@@ -1,0 +1,62 @@
+<script>
+// 池鱼单词 - 应用入口：处理与手机的互连（握手 + 词表推送 + 记录回收）
+import Interconn from './common/interconn.js'
+import storage from './common/storage.js'
+
+globalThis.conn = new Interconn()
+
+// 握手协议（与手机端"池鱼手环同步"约定一致）
+globalThis.conn.on('__hs__', (payload) => {
+  const count = (payload && payload.count) || 0
+  if (count < 2) {
+    globalThis.conn.send('__hs__', { count: count + 1 })
+  }
+})
+
+// 手机推送词表（分块发送：batch=第几块，total=总块数）
+const pendingPush = { chunks: {}, total: -1 }
+
+globalThis.conn.on('word_push', (payload) => {
+  try {
+    const batch = (payload && payload.batch) || 0
+    const total = (payload && payload.total) || 1
+    const words = (payload && payload.words) || []
+    if (batch === 0) { pendingPush.chunks = {}; pendingPush.total = total }
+    pendingPush.chunks[batch] = words
+    let got = 0
+    for (let i = 0; i < pendingPush.total; i++) {
+      if (pendingPush.chunks[i]) got++
+    }
+    if (got >= pendingPush.total) {
+      // 收齐所有分块，合并进本地词库（手机为准，按单词覆盖）
+      let merged = []
+      for (let i = 0; i < pendingPush.total; i++) {
+        merged = merged.concat(pendingPush.chunks[i] || [])
+      }
+      storage.getAll().then(obj => {
+        const map = {}
+        const cur = obj.words || []
+        cur.forEach(x => { if (x && x.w) map[x.w] = x })
+        merged.forEach(x => { if (x && x.w) map[x.w] = x })
+        obj.words = Object.keys(map).map(k => map[k])
+        storage.saveAll(obj).then(() => {
+          globalThis.conn.send('push_ack', { count: merged.length, total: obj.words.length })
+        })
+      })
+      pendingPush.chunks = {}
+    }
+  } catch (e) { }
+})
+
+// 手机请求收回学习记录
+globalThis.conn.on('record_pull', () => {
+  storage.getAll().then(obj => {
+    const recs = obj.records || []
+    globalThis.conn.send('record_back', { records: recs })
+    obj.records = []   // 发送后清空本地
+    storage.saveAll(obj)
+  })
+})
+
+export default {}
+</script>

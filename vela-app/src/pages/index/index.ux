@@ -1,0 +1,285 @@
+<template>
+	<div class="page" @touchstart="onTouchStart" @touchmove="onTouchMove" @touchend="onTouchEnd">
+
+		<!-- 首页：词库状态 -->
+		<div if="{{mode === 'home'}}" class="home">
+			<text class="appName">池鱼单词</text>
+			<text class="stat">今日待复习 {{dueCount}} 词</text>
+			<text class="stat2">词库共 {{totalCount}} 词</text>
+			<div class="btn" @click="startRound">
+				<text class="btnText">开始背单词</text>
+			</div>
+			<text class="hint2">连上手机可同步词库</text>
+		</div>
+
+		<!-- 背单词：单词卡（左滑=认识 右滑=不会 上滑=模糊） -->
+		<div if="{{mode === 'study'}}" class="card">
+			<text class="word">{{curWord.w}}</text>
+			<text class="pos">{{idx + 1}} / {{batch.length}}</text>
+			<text class="hint">←认识  →不会  ↑模糊</text>
+		</div>
+
+		<!-- 释义页 -->
+		<div if="{{mode === 'meaning'}}" class="card">
+			<text class="word">{{curWord.w}}</text>
+			<text class="mean">{{curWord.m}}</text>
+			<text class="actText">{{lastActText}}</text>
+		</div>
+
+		<!-- 本轮完成 -->
+		<div if="{{mode === 'done'}}" class="card">
+			<text class="title2">本轮完成</text>
+			<text class="stat">认识 {{statK}} · 模糊 {{statF}} · 不会 {{statN}}</text>
+			<div class="btn" @click="startRound">
+				<text class="btnText">再来一轮</text>
+			</div>
+		</div>
+
+		<text class="debug">{{debug}}</text>
+	</div>
+</template>
+
+<script>
+import storage from '../../common/storage.js'
+import srs from '../../common/srs.js'
+import brightness from '@system.brightness'
+
+export default {
+	private: {
+		mode: 'home',        // home | study | meaning | done
+		words: [],
+		batch: [],
+		idx: 0,
+		curWord: { w: '', m: '' },
+		dueCount: 0,
+		totalCount: 0,
+		statK: 0,
+		statF: 0,
+		statN: 0,
+		lastActText: '',
+		debug: ''
+	},
+	touch: { sx: 0, sy: 0, active: false },
+
+	onShow() {
+		this.reloadWords()
+	},
+
+	reloadWords() {
+		var that = this
+		storage.get('words', []).then(function (list) {
+			that.words = list || []
+			that.totalCount = that.words.length
+			var due = 0
+			for (var i = 0; i < that.words.length; i++) {
+				var w = srs.norm(that.words[i])
+				if (srs.retention(w) < 0.9) due++
+			}
+			that.dueCount = due
+		})
+	},
+
+	startRound() {
+		if (!this.words.length) {
+			this.debug = '词库为空，请先用手机同步'
+			return
+		}
+		this.batch = srs.pickBatch(this.words, 10)
+		this.idx = 0
+		this.statK = 0
+		this.statF = 0
+		this.statN = 0
+		this.curWord = this.batch[0]
+		this.mode = 'study'
+		this.debug = ''
+		try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+	},
+
+	onTouchStart(e) {
+		var t = e.touches[0]
+		this.touch.sx = t.clientX
+		this.touch.sy = t.clientY
+		this.touch.active = true
+	},
+
+	onTouchMove() { },
+
+	onTouchEnd(e) {
+		if (!this.touch.active) return
+		this.touch.active = false
+		var t = e.changedTouches ? e.changedTouches[0] : (e.touches[0] || {})
+		var ex = t.clientX
+		var ey = t.clientY
+		var dx = ex - this.touch.sx
+		var dy = ey - this.touch.sy
+		var ax = Math.abs(dx)
+		var ay = Math.abs(dy)
+		if (ax < 20 && ay < 20) return   // 轻点忽略
+		if (this.mode !== 'study') return
+		var action = null
+		if (ay > ax && dy < 0) action = 'fuzzy'          // 上滑 = 不熟
+		else if (ax >= ay && dx < 0) action = 'know'     // 左滑 = 认识
+		else if (ax >= ay && dx > 0) action = 'forget'   // 右滑 = 不会
+		if (action) this.choose(action)
+	},
+
+	choose(action) {
+		var rec = srs.updateWord(this.curWord, action)
+		// 更新词库（curWord 就是词库里的对象，直接改）
+		storage.get('records', []).then(function (recs) {
+			recs.push(rec)
+			if (recs.length > 500) recs = recs.slice(recs.length - 500)
+			storage.set('records', recs)
+		})
+		if (action === 'know') this.statK++
+		else if (action === 'fuzzy') this.statF++
+		else this.statN++
+		this.lastActText = action === 'know' ? '认识 ✓' : (action === 'fuzzy' ? '模糊 ~' : '不会 ✗')
+		this.showMeaning()
+	},
+
+	showMeaning() {
+		this.mode = 'meaning'
+		var that = this
+		setTimeout(function () {
+			that.nextWord()
+		}, 1600)
+	},
+
+	nextWord() {
+		this.idx++
+		if (this.idx >= this.batch.length) {
+			this.mode = 'done'
+			storage.set('words', this.words)
+			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+		} else {
+			this.curWord = this.batch[this.idx]
+			this.mode = 'study'
+		}
+	}
+}
+</script>
+
+<style>
+.page {
+	width: 212px;
+	height: 520px;
+	background-color: #000000;
+	flex-direction: column;
+	align-items: center;
+}
+
+.home {
+	width: 212px;
+	height: 440px;
+	margin-top: 60px;
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-start;
+}
+
+.card {
+	width: 212px;
+	height: 440px;
+	margin-top: 60px;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+}
+
+.appName {
+	font-size: 40px;
+	font-weight: bold;
+	color: #FFFFFF;
+	margin-top: 70px;
+}
+
+.title2 {
+	font-size: 38px;
+	font-weight: bold;
+	color: #FFFFFF;
+	margin-top: 40px;
+}
+
+.stat {
+	font-size: 26px;
+	color: #8AB4FF;
+	margin-top: 18px;
+}
+
+.stat2 {
+	font-size: 24px;
+	color: #888888;
+	margin-top: 6px;
+}
+
+.word {
+	font-size: 58px;
+	font-weight: bold;
+	color: #FFFFFF;
+	text-align: center;
+	lines: 2;
+	text-overflow: clip;
+	margin-left: 16px;
+	margin-right: 16px;
+}
+
+.mean {
+	font-size: 28px;
+	color: #CCCCCC;
+	text-align: center;
+	lines: 4;
+	text-overflow: clip;
+	margin-left: 16px;
+	margin-right: 16px;
+	margin-top: 24px;
+}
+
+.pos {
+	font-size: 22px;
+	color: #666666;
+	margin-top: 14px;
+}
+
+.hint {
+	font-size: 20px;
+	color: #555555;
+	margin-top: 10px;
+}
+
+.hint2 {
+	font-size: 20px;
+	color: #444444;
+	margin-top: 30px;
+}
+
+.actText {
+	font-size: 24px;
+	color: #8AB4FF;
+	margin-top: 18px;
+}
+
+.btn {
+	width: 150px;
+	height: 56px;
+	border-radius: 28px;
+	background-color: #1C1C22;
+	border: 1px solid #FFFFFF24;
+	align-items: center;
+	justify-content: center;
+	margin-top: 34px;
+}
+
+.btnText {
+	font-size: 26px;
+	color: #FFFFFF;
+}
+
+.debug {
+	font-size: 18px;
+	color: #CC4444;
+	position: absolute;
+	top: 460px;
+	left: 10px;
+}
+</style>

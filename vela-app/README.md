@@ -1,0 +1,56 @@
+# 池鱼单词（手环端 Vela 应用）
+
+小米手环 10 上极简背单词应用。与手机端「池鱼Study」配套：手机负责选词导出和记录回收，手环端**自带遗忘曲线算法**，离线也能智能选词。
+
+## 交互设计（用户锁定）
+
+- 主界面：先显示**英文单词**，三个方向滑动选择：
+  - **左滑 = 认识（know）**
+  - **右滑 = 不会（forget）**
+  - **上滑 = 不熟（fuzzy）**
+- 选择后立即显示**释义**，1.6 秒后自动进入下一词
+- 一轮 10 词，背完显示本轮统计（认识/模糊/不会），可再来一轮
+- 连接手机后可同步词库、收回学习记录
+
+## 智能选词（内置算法 srs.js）
+
+- **记忆保持率** R(t) = exp(-t/S)：S 为稳定性（由间隔与难度估计），t 为距上次复习的天数
+- 一轮选词**到期优先**（R < 0.9 的先问）→ 其次熟练度低的 → 再按紧急度补足，带轻微随机
+- 选择后按简化 SM-2 更新：认识→间隔翻倍+难度微升；模糊→间隔减半；不会→重置 1 天+难度下降
+- 每个选择记录**精确时间**，随记录同步回手机合并进 SRS
+
+## 目录结构
+
+```
+vela-app/
+├── src/
+│   ├── manifest.json        # 应用配置（designWidth 212，features 声明互连等权限）
+│   ├── app.ux               # 入口：互连握手 + 词表推送 + 记录回收
+│   ├── common/
+│   │   ├── logo.png         # 图标
+│   │   ├── storage.js       # 文件存储封装（internal://files/words/data.json）
+│   │   ├── srs.js           # 遗忘曲线算法（选词 + 更新）
+│   │   └── interconn.js     # 互连封装（消息分发）
+│   └── pages/index/index.ux # 主界面（单词卡 + 滑动手势）
+├── package.json             # aiot-toolkit 构建配置
+└── LICENSE                  # AGPL-3.0（衍生自喵喵电子书）
+```
+
+## 构建
+
+```bash
+npm install
+npm run build      # 产物在 dist/ 下，得到 .rpk 安装包
+```
+
+## 安装到手环
+
+1. 小米手环 10（Vela 系统）开启「开发者选项」（设置-关于-连点版本号 7 次）
+2. 用 **AstroBox**（米坛开发者工具）连接手环，安装 `.rpk`
+3. 词库同步两条路径：
+   - **AstroBox 文件推送**：把手机导出的 `wordlist.json` 推到手环内部路径 `internal://files/words/data.json`（内容格式见 `docs/同步协议.md`）
+   - **蓝牙互连**：配合手机端「池鱼手环同步」App（本项目 companion 目录，开发中），连接后自动推送词表、收回记录
+
+## 版权说明
+
+本项目衍生自 [喵喵电子书](https://github.com/bandbbs/com.bandbbs.ebook)（AGPL-3.0）与 [弦电子书](https://github.com/youshen2/com.bandbbs.ebook)，沿用 AGPL-3.0 协议开源。
