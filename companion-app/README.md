@@ -12,7 +12,16 @@
 | 推送词表 | 读取池鱼Study 导出的 JSON 词表，按 `word_push` 协议分块（20词/块）推送，显示进度 + 手环确认 |
 | 收回记录 | 发 `record_pull` 取回手环学习记录，保存到 `Download/Chiyu/池鱼手环记录_*.json`，引导导入池鱼Study |
 
-## 使用流程
+## 使用流程（本地直连：推荐，免传文件）
+
+1. 手环端已安装「池鱼单词」应用（.rpk）
+2. 打开「池鱼Study」→ 我的 → 手环背单词 → **🔗启动本地同步**（出现"服务运行中"）
+3. **一键推送**：点「🚀一键推送」→ 自动拉起本 App → 自动从池鱼Study 拉词表 → 自动推到手环（全程无需选文件）
+4. **收回记录**：在本 App 点"收回学习记录" → 手环记录**自动回传**池鱼Study（显示合并统计）
+
+> 兜底方案：本地直连不可用时，本 App 仍支持手动选文件推送、收回记录保存到 `Download/Chiyu/` 后由池鱼Study 导入。
+
+## 使用流程（文件兜底）
 
 1. 手环端已安装「池鱼单词」应用（.rpk）
 2. 打开本 App → 点击"手环连接中"卡片 → 连接成功（需先确认小米运动健康连接着手环）
@@ -26,9 +35,10 @@ companion-app/
 ├── app/
 │   ├── libs/xms-wearable-lib_1.4_release.aar   # 小米穿戴 SDK
 │   └── src/main/java/com/chiyu/sync/
-│       ├── MainActivity.kt          # 主界面：连接 + 选词表 + 收回记录
-│       ├── WordPushActivity.kt      # 词表分块推送（word_push 协议）
-│       ├── RecordPullActivity.kt    # 收回记录（record_pull/record_back）
+│       ├── MainActivity.kt          # 主界面：连接 + 选词表 + 收回记录 + chiyu-sync:// 一键拉起
+│       ├── WordPushActivity.kt      # 词表分块推送（word_push 协议，支持本地直连拉词表）
+│       ├── RecordPullActivity.kt    # 收回记录（record_pull/record_back，自动回传池鱼Study）
+│       ├── HttpBridge.kt            # 本地直连桥（127.0.0.1:8765 拉词表/回传记录）
 │       └── logic/
 │           ├── Interconn.kt         # 小米穿戴 API 封装
 │           └── InterHandshake.kt    # 握手协议（__hs__）

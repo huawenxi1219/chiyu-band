@@ -100,36 +100,56 @@ class WordPushActivity : ComponentActivity() {
         var done by remember { mutableStateOf(false) }
 
         LaunchedEffect(Unit) {
-            // 1. 解析词表 JSON
+            val httpMode = intent.getBooleanExtra("http_mode", false)
             val uri = intent.data
-            if (uri == null) {
+            if (!httpMode && uri == null) {
                 statusText = "缺少词表文件"
                 imgSrc = R.drawable.fail
                 btnText = "返回"
                 return@LaunchedEffect
             }
-            val name = contentResolver.query(uri, null, null, null, null)?.use { c ->
-                if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)) else "词表.json"
-            } ?: "词表.json"
-            filename = name
 
-            val words = withContext(Dispatchers.IO) {
-                try {
-                    val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-                    when {
-                        text.trimStart().startsWith("[") ->
-                            json.decodeFromString<List<WordItem>>(text)
-                        else -> json.decodeFromString<WordListPayload>(text).words
-                    }
-                } catch (e: Exception) {
-                    emptyList()
+            val words: List<WordItem>
+            if (httpMode) {
+                // 一键模式：从池鱼Study本地服务直接拉词表，无需选文件
+                val scope = intent.getStringExtra("scope") ?: "due"
+                val count = intent.getIntExtra("count", 50)
+                filename = "池鱼Study · 一键推送"
+                statusText = "正在从池鱼Study拉取词表..."
+                val fetched = withContext(Dispatchers.IO) {
+                    HttpBridge.fetchWordlist(scope, count)
                 }
-            }
-            if (words.isEmpty()) {
-                statusText = "词表为空或解析失败"
-                imgSrc = R.drawable.fail
-                btnText = "返回"
-                return@LaunchedEffect
+                if (fetched.isNullOrEmpty()) {
+                    statusText = "拉取失败：请先打开池鱼Study并「🔗启动本地同步」"
+                    imgSrc = R.drawable.fail
+                    btnText = "返回"
+                    return@LaunchedEffect
+                }
+                words = fetched
+            } else {
+                // 文件模式：解析用户选择的词表 JSON
+                val name = contentResolver.query(uri!!, null, null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)) else "词表.json"
+                } ?: "词表.json"
+                filename = name
+                words = withContext(Dispatchers.IO) {
+                    try {
+                        val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                        when {
+                            text.trimStart().startsWith("[") ->
+                                json.decodeFromString<List<WordItem>>(text)
+                            else -> json.decodeFromString<WordListPayload>(text).words
+                        }
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+                if (words.isEmpty()) {
+                    statusText = "词表为空或解析失败"
+                    imgSrc = R.drawable.fail
+                    btnText = "返回"
+                    return@LaunchedEffect
+                }
             }
             wordCount = words.size
             statusText = "已解析 ${words.size} 词，正在连接..."

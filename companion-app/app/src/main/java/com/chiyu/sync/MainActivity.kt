@@ -75,6 +75,31 @@ class MainActivity : ComponentActivity() {
         setContent {
             MainActivityPage()
         }
+        handleSyncLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSyncLink(intent)
+    }
+
+    /** 处理池鱼Study 的一键拉起：chiyu-sync://push?scope=due&count=50 */
+    private fun handleSyncLink(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "chiyu-sync") return
+        when (uri.host) {
+            "push" -> {
+                val scope = uri.getQueryParameter("scope") ?: "due"
+                val count = uri.getQueryParameter("count")?.toIntOrNull() ?: 50
+                startActivity(
+                    Intent(this, WordPushActivity::class.java)
+                        .putExtra("http_mode", true)
+                        .putExtra("scope", scope)
+                        .putExtra("count", count)
+                )
+            }
+        }
     }
 
     override fun onDestroy() {

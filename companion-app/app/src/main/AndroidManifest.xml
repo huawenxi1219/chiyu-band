@@ -28,6 +28,12 @@
                 <data android:mimeType="application/json"/>
                 <data android:mimeType="text/plain"/>
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="chiyu-sync"/>
+            </intent-filter>
         </activity>
         <activity android:name=".WordPushActivity" android:exported="false">
             <intent-filter>

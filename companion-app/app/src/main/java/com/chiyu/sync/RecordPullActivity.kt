@@ -118,18 +118,35 @@ class RecordPullActivity : ComponentActivity() {
                     return@LaunchedEffect
                 }
 
-                // 保存到 Download/Chiyu/
-                val savedPath = withContext(Dispatchers.IO) {
-                    saveToDownloads(recordsJson!!)
+                // 优先：自动回传池鱼Study（本地直连，无需导文件）
+                val postResult = withContext(Dispatchers.IO) {
+                    HttpBridge.postRecords(recordsJson!!)
                 }
-                if (savedPath != null) {
-                    statusText = "✅ 已收回 $count 条记录"
-                    resultText = "已保存到：\n$savedPath\n\n打开「池鱼Study」→ 我的 → 手环背单词 → 导入记录，选择此文件即可合并"
+                if (postResult != null) {
+                    statusText = "✅ 已收回 $count 条并回传池鱼Study"
+                    val bad = postResult.bad.joinToString("、") { it }
+                    resultText = buildString {
+                        append("合并 ${postResult.merged} 条 · 更新 ${postResult.updated} 词 · 新增待复习 ${postResult.new_due} 词")
+                        if (postResult.bad.isNotEmpty()) {
+                            append("\n⚠️ 连续记错需再复习：$bad")
+                        }
+                        append("\n\n回传失败时本App也会保存文件兜底")
+                    }
                     imgSrc = R.drawable.success
                 } else {
-                    statusText = "记录已收回（$count 条），但保存失败"
-                    resultText = "请检查存储权限后重试"
-                    imgSrc = R.drawable.fail
+                    // 兜底：保存到 Download/Chiyu/ 供手动导入
+                    val savedPath = withContext(Dispatchers.IO) {
+                        saveToDownloads(recordsJson!!)
+                    }
+                    if (savedPath != null) {
+                        statusText = "✅ 已收回 $count 条（本地直连不可用，已存文件）"
+                        resultText = "已保存到：\n$savedPath\n\n打开「池鱼Study」→ 我的 → 手环背单词 → 导入记录，选择此文件即可合并"
+                        imgSrc = R.drawable.success
+                    } else {
+                        statusText = "记录已收回（$count 条），但保存失败"
+                        resultText = "请检查存储权限后重试"
+                        imgSrc = R.drawable.fail
+                    }
                 }
                 btnText = "完成"
             } catch (e: Exception) {
