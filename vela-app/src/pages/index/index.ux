@@ -9,14 +9,14 @@
 			<div class="btn" @click="startRound">
 				<text class="btnText">开始背单词</text>
 			</div>
-			<text class="hint2">连上手机可同步词库</text>
+			<text class="hint2">右滑退出 · 连手机可同步词库</text>
 		</div>
 
-		<!-- 背单词：单词卡（左滑=认识 右滑=不会 上滑=模糊） -->
+		<!-- 背单词：单词卡（左滑=认识 上滑=模糊 下滑=不会 右滑=退出） -->
 		<div if="{{mode === 'study'}}" class="card">
 			<text class="word">{{curWord.w}}</text>
 			<text class="pos">{{idx + 1}} / {{batch.length}}</text>
-			<text class="hint">←认识  →不会  ↑模糊</text>
+			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
 		<!-- 释义页 -->
@@ -33,6 +33,7 @@
 			<div class="btn" @click="startRound">
 				<text class="btnText">再来一轮</text>
 			</div>
+			<text class="hint2">右滑退出</text>
 		</div>
 
 		<text class="debug">{{debug}}</text>
@@ -43,6 +44,7 @@
 import storage from '../../common/storage.js'
 import srs from '../../common/srs.js'
 import brightness from '@system.brightness'
+import app from '@system.app'
 
 export default {
 	private: {
@@ -115,12 +117,35 @@ export default {
 		var ax = Math.abs(dx)
 		var ay = Math.abs(dy)
 		if (ax < 20 && ay < 20) return   // 轻点忽略
+		// 右滑 = 退出应用（任何界面都生效，符合手环习惯）
+		if (ax >= ay && dx > 0) {
+			this.exitApp()
+			return
+		}
+		// 背单词三选一：左滑=认识 上滑=模糊 下滑=不会
 		if (this.mode !== 'study') return
 		var action = null
-		if (ay > ax && dy < 0) action = 'fuzzy'          // 上滑 = 不熟
+		if (ay > ax && dy < 0) action = 'fuzzy'          // 上滑 = 模糊
+		else if (ay > ax && dy > 0) action = 'forget'    // 下滑 = 不会
 		else if (ax >= ay && dx < 0) action = 'know'     // 左滑 = 认识
-		else if (ax >= ay && dx > 0) action = 'forget'   // 右滑 = 不会
 		if (action) this.choose(action)
+	},
+
+	exitApp() {
+		// 退出前保存当前进度（记录已在 choose 时实时写入）
+		try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+		try { app.terminate() } catch (e) { }
+	},
+
+	onBackPress() {
+		// 手环物理返回键：答题中回首页，首页/完成页直接退出
+		if (this.mode === 'study' || this.mode === 'meaning') {
+			this.mode = 'home'
+			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+		} else {
+			this.exitApp()
+		}
+		return true
 	},
 
 	choose(action) {
