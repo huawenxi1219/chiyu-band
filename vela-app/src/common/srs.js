@@ -118,6 +118,20 @@ function baseIntervalHours(gap) {
   return 48                    // 低频 → 2 天
 }
 
+// 全库动态选词：每个词独立计算紧迫度，从整个词库选当下最该学的一个
+// excluded: 本轮已答过的词（不重复问），返回 null 表示词库已学完一遍
+function pickNextAll(words, excluded) {
+  var best = null, bestU = -1
+  for (var i = 0; i < words.length; i++) {
+    var w = norm(words[i])
+    var key = (w.w || '').toLowerCase()
+    if (excluded && excluded[key]) continue
+    var u = urgency(w) + Math.random() * 0.25
+    if (u > bestU) { bestU = u; best = w }
+  }
+  return best
+}
+
 // 更新一个词：action = know | forget | fuzzy
 // opts: { rt: 看单词反应毫秒, dwell: 释义停留毫秒, gap: 使用频率小时 }
 // 间隔为"天"（可小数，如 0.125 天 = 3 小时），next 精确到毫秒
@@ -162,6 +176,7 @@ export default {
   retention: retention,
   urgency: urgency,
   pickBatch: pickBatch,
+  pickNextAll: pickNextAll,
   updateWord: updateWord,
   estimateGapHours: estimateGapHours,
   baseIntervalHours: baseIntervalHours

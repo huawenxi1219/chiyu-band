@@ -86,5 +86,32 @@ srs.norm(fresh);
 ok(srs.urgency(aging) > srs.urgency(fresh), "遗忘线附近的词比刚复习的词紧急(动态选词优先)");
 // 13. estimateGapHours：记录太少返回 null（用默认）
 ok(srs.estimateGapHours([{ t: "2026-10-18 08:00:00" }]) === null, "单条记录 gap=null(用默认)");
+// 14. 全库动态选词 pickNextAll：最紧急的词优先
+let lib = [
+  { w: "aging", m: "x", lvl: 1, i: 1, e: 1.5, c: 0, wc: 2, next: Date.now() - 20 * 86400000 },
+  { w: "fresh", m: "x", lvl: 4, i: 10, e: 2.8, c: 5, wc: 0, next: Date.now() }
+];
+let n1 = srs.pickNextAll(lib, {});
+ok(n1 && n1.w === "aging", "pickNextAll 选最紧急的词");
+// 15. 排除已答：不会重复选
+let n2 = srs.pickNextAll(lib, { aging: true });
+ok(n2 && n2.w === "fresh", "pickNextAll 排除已答");
+// 16. 词库学完一遍 → null
+let n3 = srs.pickNextAll(lib, { aging: true, fresh: true });
+ok(n3 === null, "词库全部答完 → null(done)");
+// 17. 每个词独立调度：答完"不会"的词下次更优先（不依赖批次）
+let solo = [
+  { w: "w1", m: "x", lvl: 2, i: 3, e: 2.5, c: 1, wc: 0, next: Date.now() },
+  { w: "w2", m: "x", lvl: 2, i: 3, e: 2.5, c: 1, wc: 0, next: Date.now() }
+];
+let picked = srs.pickNextAll(solo, {});
+let pickedWord = picked.w;
+srs.updateWord(picked, "forget", { gap: 3 });  // 这个词答错，状态更新
+let nextPick = srs.pickNextAll(solo, { [pickedWord]: true });  // 排除刚答的
+let other = solo.find(x => x.w !== pickedWord);
+ok(nextPick.w === other.w, "答完排除后选另一个");
+// 重新模拟第二轮：答错的词间隔重置 → urgency 上升 → 再次全库选词时优先
+let round2 = srs.pickNextAll(solo, { [other.w]: true });
+ok(round2.w === pickedWord, "第二轮该词独立地最紧急(单独计算)");
 console.log("结果: %d 通过 / %d 失败", pass, fail);
 if (fail > 0) process.exit(1);

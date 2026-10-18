@@ -15,7 +15,7 @@
 		<!-- 背单词：单词卡（左滑=认识 上滑=模糊 下滑=不会 右滑=退出） -->
 		<div if="{{mode === 'study'}}" class="card">
 			<text class="word">{{curWord.w}}</text>
-			<text class="pos">{{idx + 1}} / {{batch.length}}</text>
+			<text class="pos">已学 {{idx}} · 词库 {{totalCount}}</text>
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
@@ -51,8 +51,7 @@ export default {
 	private: {
 		mode: 'home',        // home | study | meaning | done
 		words: [],
-		batch: [],
-		answered: {},        // 本轮已答过的词（动态选词防重复）
+		answered: {},        // 本轮已答过的词（全库动态选词防重复）
 		idx: 0,
 		curWord: { w: '', m: '' },
 		dueCount: 0,
@@ -97,15 +96,19 @@ export default {
 			this.debug = '词库为空，请先用手机同步'
 			return
 		}
-		// 预选一轮候选（按遗忘曲线+熟练度+错次综合排序）
-		this.batch = srs.pickBatch(this.words, 10)
+		// 全库动态选词：每个词独立计算紧迫度，先学最该学的
 		this.answered = {}
 		this.idx = 0
 		this.statK = 0
 		this.statF = 0
 		this.statN = 0
 		this.pendingRec = null
-		this.curWord = this.batch[0]
+		var first = srs.pickNextAll(this.words, this.answered)
+		if (!first) {
+			this.debug = '词库为空，请先用手机同步'
+			return
+		}
+		this.curWord = first
 		this.studyStart = Date.now()
 		this.mode = 'study'
 		this.debug = ''
@@ -199,23 +202,17 @@ export default {
 			this.pendingRec = null
 		}
 		this.answered[this.curWord.w] = true
-		// 动态选词：从剩余候选里实时选最紧急的（遗忘曲线+熟练度+错次+轻微随机）
-		// 刚选"不会"的词状态已更新（间隔重置）→ urgency 实时上升，但本轮已答不重复问
-		var best = null
-		var bestU = -1
-		for (var i = 0; i < this.batch.length; i++) {
-			var w = this.batch[i]
-			if (this.answered[w.w]) continue
-			var u = srs.urgency(w) + Math.random() * 0.25
-			if (u > bestU) { bestU = u; best = w }
-		}
-		if (best) {
+		// 全库动态选词：排除已答，从整个词库挑当下最紧急的一个
+		// 每个词独立计算（遗忘曲线+熟练度+错次+刚更新的状态），轻微随机防同序
+		var next = srs.pickNextAll(this.words, this.answered)
+		if (next) {
 			this.idx++
-			this.curWord = best
+			this.curWord = next
 			this.studyStart = Date.now()
 			this.mode = 'study'
 		} else {
-			this.idx = this.batch.length
+			// 整个词库学完一遍
+			this.idx = this.words.length
 			this.mode = 'done'
 			storage.set('words', this.words)
 			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
