@@ -19,11 +19,12 @@
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
-		<!-- 释义页 -->
+		<!-- 释义页（轻点继续，右滑退出） -->
 		<div if="{{mode === 'meaning'}}" class="card">
 			<text class="word">{{curWord.w}}</text>
 			<text class="mean">{{curWord.m}}</text>
 			<text class="actText">{{lastActText}}</text>
+			<text class="hint2">轻点继续 · 右滑退出</text>
 		</div>
 
 		<!-- 本轮完成 -->
@@ -59,6 +60,9 @@ export default {
 		statF: 0,
 		statN: 0,
 		lastActText: '',
+		studyStart: 0,     // 当前词显示时刻（用于算反应时间）
+		meaningStart: 0,   // 释义显示时刻（用于算停留时间）
+		pendingRec: null,  // 待补 dwell 的记录
 		debug: ''
 	},
 	touch: { sx: 0, sy: 0, active: false },
@@ -91,7 +95,9 @@ export default {
 		this.statK = 0
 		this.statF = 0
 		this.statN = 0
+		this.pendingRec = null
 		this.curWord = this.batch[0]
+		this.studyStart = Date.now()
 		this.mode = 'study'
 		this.debug = ''
 		try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
@@ -116,23 +122,29 @@ export default {
 		var dy = ey - this.touch.sy
 		var ax = Math.abs(dx)
 		var ay = Math.abs(dy)
-		if (ax < 20 && ay < 20) return   // 轻点忽略
+		var isTap = ax < 20 && ay < 20
 		// 右滑 = 退出应用（任何界面都生效，符合手环习惯）
 		if (ax >= ay && dx > 0) {
 			this.exitApp()
 			return
 		}
+		// 释义页：轻点继续下一词（同时记下释义停留时间）
+		if (this.mode === 'meaning' && isTap) {
+			this.nextWord()
+			return
+		}
+		if (isTap) return   // 其它界面轻点忽略
 		// 背单词三选一：左滑=认识 上滑=模糊 下滑=不会
 		if (this.mode !== 'study') return
 		var action = null
 		if (ay > ax && dy < 0) action = 'fuzzy'          // 上滑 = 模糊
 		else if (ay > ax && dy > 0) action = 'forget'    // 下滑 = 不会
 		else if (ax >= ay && dx < 0) action = 'know'     // 左滑 = 认识
-		if (action) this.choose(action)
+		if (action) this.choose(action, Date.now() - this.studyStart)
 	},
 
 	exitApp() {
-		// 退出前保存当前进度（记录已在 choose 时实时写入）
+		// 退出前保存当前进度（记录已在 nextWord 时实时写入）
 		try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 		try { app.terminate() } catch (e) { }
 	},
@@ -141,6 +153,7 @@ export default {
 		// 手环物理返回键：答题中回首页，首页/完成页直接退出
 		if (this.mode === 'study' || this.mode === 'meaning') {
 			this.mode = 'home'
+			this.pendingRec = null
 			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 		} else {
 			this.exitApp()
@@ -148,14 +161,10 @@ export default {
 		return true
 	},
 
-	choose(action) {
-		var rec = srs.updateWord(this.curWord, action)
-		// 更新词库（curWord 就是词库里的对象，直接改）
-		storage.get('records', []).then(function (recs) {
-			recs.push(rec)
-			if (recs.length > 500) recs = recs.slice(recs.length - 500)
-			storage.set('records', recs)
-		})
+	choose(action, rt) {
+		// 先更新 SRS（含反应时间），记录暂存，释义停留后补 dwell 再落盘
+		var rec = srs.updateWord(this.curWord, action, { rt: rt })
+		this.pendingRec = rec
 		if (action === 'know') this.statK++
 		else if (action === 'fuzzy') this.statF++
 		else this.statN++
@@ -165,13 +174,21 @@ export default {
 
 	showMeaning() {
 		this.mode = 'meaning'
-		var that = this
-		setTimeout(function () {
-			that.nextWord()
-		}, 1600)
+		this.meaningStart = Date.now()
 	},
 
 	nextWord() {
+		// 补上释义停留时间，落盘记录
+		if (this.pendingRec) {
+			this.pendingRec.dwell = Date.now() - this.meaningStart
+			var that = this
+			storage.get('records', []).then(function (recs) {
+				recs.push(that.pendingRec)
+				if (recs.length > 500) recs = recs.slice(recs.length - 500)
+				storage.set('records', recs)
+			})
+			this.pendingRec = null
+		}
 		this.idx++
 		if (this.idx >= this.batch.length) {
 			this.mode = 'done'
@@ -179,6 +196,7 @@ export default {
 			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 		} else {
 			this.curWord = this.batch[this.idx]
+			this.studyStart = Date.now()
 			this.mode = 'study'
 		}
 	}
