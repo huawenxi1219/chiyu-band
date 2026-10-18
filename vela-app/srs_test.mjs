@@ -68,5 +68,23 @@ let r3 = srs.retention(hw);                            // 立刻算：刚复习 
 hw.next = hw.next - 3 * 3600000;                       // 模拟3小时后
 let r4 = srs.retention(hw);
 ok(r4 < 0.9, "3小时后该词到期(r=%s<0.9)".replace("%s", r4.toFixed(2)));
+// 10. 动态选词基础：候选不重复
+let uniq = new Set(batch.map(x => x.w));
+ok(uniq.size === batch.length, "pickBatch 候选不重复");
+// 11. 选"不会"后 urgency 实时上升 → 下轮更优先（动态选词的依据）
+let uw = { w: "u1", m: "x", lvl: 3, i: 5, e: 2.5, c: 2, wc: 0 };
+srs.norm(uw);
+let uBefore = srs.urgency(uw);
+srs.updateWord(uw, "forget", { gap: 3 });
+let uAfter = srs.urgency(uw);
+ok(uAfter > uBefore, "选不会后 urgency 上升(%s→%s)".replace("%s", uBefore.toFixed(2)).replace("%s", uAfter.toFixed(2)));
+// 12. 快忘的词(长时间未复习)urgency 最高 → 优先被动态选中
+let aging = { w: "old", m: "x", lvl: 1, i: 1, e: 1.5, c: 0, wc: 0, next: Date.now() - 30 * 86400000 };
+srs.norm(aging);
+let fresh = { w: "new", m: "x", lvl: 1, i: 3, e: 2.5, c: 1, wc: 0, next: Date.now() };
+srs.norm(fresh);
+ok(srs.urgency(aging) > srs.urgency(fresh), "遗忘线附近的词比刚复习的词紧急(动态选词优先)");
+// 13. estimateGapHours：记录太少返回 null（用默认）
+ok(srs.estimateGapHours([{ t: "2026-10-18 08:00:00" }]) === null, "单条记录 gap=null(用默认)");
 console.log("结果: %d 通过 / %d 失败", pass, fail);
 if (fail > 0) process.exit(1);
