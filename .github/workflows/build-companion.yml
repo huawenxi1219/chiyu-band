@@ -1,3 +1,4 @@
+# 伴生App「池鱼手环同步」CI 构建：push 触发 assembleDebug 出 APK
 name: Build Companion APK
 
 on:
