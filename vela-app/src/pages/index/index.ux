@@ -3,24 +3,26 @@
 
 		<!-- 首页：词库状态 -->
 		<div if="{{mode === 'home'}}" class="home">
-			<text class="appName">池鱼单词</text>
-			<text class="stat">今日待复习 {{dueCount}} 词</text>
-			<text class="stat2">词库共 {{totalCount}} 词</text>
-			<div class="btn" @click="startRound">
-				<text class="btnText">开始背单词</text>
+			<div class="homeCard">
+				<text class="appName">池鱼单词</text>
+				<text class="stat">今日待复习 {{dueCount}} 词</text>
+				<text class="stat2">词库共 {{totalCount}} 词</text>
+				<div class="btn" @click="startRound">
+					<text class="btnText">开始背单词</text>
+				</div>
+				<text class="hint2">右滑退出 · 连手机可同步词库</text>
 			</div>
-			<text class="hint2">右滑退出 · 连手机可同步词库</text>
 		</div>
 
 		<!-- 背单词：单词卡（左滑=认识 上滑=模糊 下滑=不会 右滑=退出） -->
-		<div if="{{mode === 'study'}}" class="card">
+		<div if="{{mode === 'study'}}" class="card animIn">
 			<text class="word">{{curWord.w}}</text>
 			<text class="pos">已学 {{idx}} · 词库 {{totalCount}}</text>
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
 		<!-- 释义页（轻点继续，右滑退出） -->
-		<div if="{{mode === 'meaning'}}" class="card">
+		<div if="{{mode === 'meaning'}}" class="card animIn">
 			<text class="word">{{curWord.w}}</text>
 			<text class="mean">{{curWord.m}}</text>
 			<text class="actText">{{lastActText}}</text>
@@ -28,7 +30,7 @@
 		</div>
 
 		<!-- 本轮完成 -->
-		<div if="{{mode === 'done'}}" class="card">
+		<div if="{{mode === 'done'}}" class="card animIn">
 			<text class="title2">本轮完成</text>
 			<text class="stat">认识 {{statK}} · 模糊 {{statF}} · 不会 {{statN}}</text>
 			<div class="btn" @click="startRound">
@@ -222,12 +224,23 @@ export default {
 </script>
 
 <style>
+/* AstroBox 风格：深色 #0D0D0F · 主色 #1781FF · 大圆角卡片 */
 .page {
 	width: 212px;
 	height: 520px;
-	background-color: #000000;
+	background-color: #0D0D0F;
 	flex-direction: column;
 	align-items: center;
+}
+
+/* 入场动画：缩放 + 淡入 */
+@keyframes popIn {
+	from { transform: scale(0.92); opacity: 0; }
+	to { transform: scale(1); opacity: 1; }
+}
+
+.animIn {
+	animation: popIn 0.3s cubic-bezier(0.18, 0.86, 0.34, 1);
 }
 
 .home {
@@ -239,10 +252,24 @@ export default {
 	justify-content: flex-start;
 }
 
+/* 首页浮层卡片（AstroBox 大圆角半透明层风格） */
+.homeCard {
+	width: 196px;
+	height: 440px;
+	border-radius: 28px;
+	background-color: rgba(255, 255, 255, 0.05);
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-start;
+}
+
+/* 大圆角浮层卡片 */
 .card {
-	width: 212px;
+	width: 196px;
 	height: 440px;
 	margin-top: 60px;
+	border-radius: 28px;
+	background-color: rgba(255, 255, 255, 0.05);
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
@@ -264,7 +291,7 @@ export default {
 
 .stat {
 	font-size: 26px;
-	color: #8AB4FF;
+	color: #5BA3FF;
 	margin-top: 18px;
 }
 
@@ -316,24 +343,26 @@ export default {
 
 .actText {
 	font-size: 24px;
-	color: #8AB4FF;
+	color: #5BA3FF;
 	margin-top: 18px;
 }
 
+/* 实心主色按钮（AstroBox 强调色 #1781FF） */
 .btn {
-	width: 150px;
+	width: 156px;
 	height: 56px;
 	border-radius: 28px;
-	background-color: #1C1C22;
-	border: 1px solid #FFFFFF24;
+	background-color: #1781FF;
 	align-items: center;
 	justify-content: center;
 	margin-top: 34px;
+	transition: transform 0.15s ease-in-out;
 }
 
 .btnText {
 	font-size: 26px;
 	color: #FFFFFF;
+	font-weight: bold;
 }
 
 .debug {

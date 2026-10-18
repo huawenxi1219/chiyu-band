@@ -204,6 +204,14 @@ class WordPushActivity : ComponentActivity() {
                     waited++
                 }
                 done = true
+                // 一键模式（从池鱼Study拉词）推送完毕 → 回执标记"已同步"，
+                // 池鱼Study 端"⚠ 未同步"提醒随之消失
+                if (httpMode) {
+                    val pushedWords = words.map { it.w }
+                    withContext(Dispatchers.IO) {
+                        HttpBridge.postSyncAck(pushedWords)
+                    }
+                }
                 if (acked) {
                     statusText = "✅ 推送完成，手环已接收 $wordCount 词"
                     imgSrc = R.drawable.success

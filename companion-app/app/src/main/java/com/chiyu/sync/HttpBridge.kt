@@ -3,6 +3,7 @@ package com.chiyu.sync
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -42,6 +43,30 @@ object HttpBridge {
         val updated: Int = 0,
         val new_due: Int = 0,
         val bad: List<String> = emptyList()
+    )
+
+    /** 推送词表成功后通知池鱼Study，标记这些词"已同步"（新增词提醒自动消失） */
+    fun postSyncAck(words: List<String>): Boolean {
+        return try {
+            val body = json.encodeToString(SyncAckPayload(words))
+            val conn = URL("$BASE/api/sync_ack").openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = TIMEOUT
+            conn.readTimeout = TIMEOUT
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val ok = conn.responseCode == 200
+            conn.disconnect()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    @Serializable
+    data class SyncAckPayload(
+        val words: List<String> = emptyList()
     )
 
     /** 检查池鱼Study 本地服务是否在线 */
