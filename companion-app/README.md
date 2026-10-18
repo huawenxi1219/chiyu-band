@@ -48,7 +48,7 @@ companion-app/
 
 ## 构建
 
-**GitHub Actions**（推荐）：推送到仓库后自动构建，在 Actions 页面下载 APK（workflow 见 `.github/workflows/build-companion.yml`）。
+**GitHub Actions**（推荐）：推送到仓库后自动构建，在 Actions 页面下载 APK（workflow 见 `.github/workflows/build-companion.yml`；构建机为 ubuntu-22.04）。
 **本地**：用 Android Studio 打开 `companion-app/` 目录，等待 Gradle 同步后 Run。
 
 > 说明：release 签名通过根目录 `keystore.properties` + `release.keystore` 配置（可选）；没有配置时用默认 debug 签名。
