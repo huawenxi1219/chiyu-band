@@ -11,6 +11,9 @@
 					<text class="btnText">开始背单词</text>
 				</div>
 				<text class="hint2">右滑退出 · 连手机可同步词库</text>
+				<div class="btnExit" @click="exitApp">
+					<text class="btnExitText">退出</text>
+				</div>
 			</div>
 		</div>
 
@@ -36,6 +39,9 @@
 			<div class="btn" @click="startRound">
 				<text class="btnText">再来一轮</text>
 			</div>
+			<div class="btnExit" @click="exitApp">
+				<text class="btnExitText">退出</text>
+			</div>
 			<text class="hint2">右滑退出</text>
 		</div>
 
@@ -48,6 +54,7 @@ import storage from '../../common/storage.js'
 import srs from '../../common/srs.js'
 import brightness from '@system.brightness'
 import app from '@system.app'
+import router from '@system.router'
 
 export default {
 	private: {
@@ -161,6 +168,10 @@ export default {
 		// 退出前保存当前进度（记录已在 nextWord 时实时写入）
 		try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 		try { app.terminate() } catch (e) { }
+		// 兜底：terminate 未生效时清空页面栈回到桌面
+		setTimeout(function () {
+			try { router.clear() } catch (e) { }
+		}, 300)
 	},
 
 	onBackPress() {
@@ -362,6 +373,24 @@ export default {
 .btnText {
 	font-size: 26px;
 	color: #FFFFFF;
+	font-weight: bold;
+}
+
+/* 次要退出按钮（半透明小按钮，点击退出应用） */
+.btnExit {
+	width: 96px;
+	height: 44px;
+	border-radius: 22px;
+	background-color: rgba(255, 255, 255, 0.06);
+	align-items: center;
+	justify-content: center;
+	margin-top: 16px;
+	transition: transform 0.15s ease-in-out;
+}
+
+.btnExitText {
+	font-size: 22px;
+	color: #888888;
 	font-weight: bold;
 }
 
