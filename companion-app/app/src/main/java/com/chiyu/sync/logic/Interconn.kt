@@ -60,7 +60,8 @@ open class Interconn(context: Context){
     }
     fun openApp():CompletableDeferred<Unit> {
         return CompletableDeferred<Unit>().apply {
-            nodeApi.launchWearApp(currentNode!!.id,"/pages/push").addOnSuccessListener {
+            // 手环端「池鱼单词」的入口页是 /pages/index（manifest 无 /pages/push）
+            nodeApi.launchWearApp(currentNode!!.id,"/pages/index").addOnSuccessListener {
                 Log.d("OpenApp","success")
                 complete(Unit)
             }.addOnFailureListener {

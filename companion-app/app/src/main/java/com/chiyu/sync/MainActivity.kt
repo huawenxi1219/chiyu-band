@@ -202,20 +202,16 @@ class MainActivity : ComponentActivity() {
                 conn.destroy().await()
                 val deviceName = conn.connect().await().replace(" ", "")
                 conn.auth()
+                // 说明：isWearAppInstalled 对 AstroBox 侧载的应用不可靠（会误报未安装），
+                // 不再做安装预检，直接尝试打开手环端应用，打开失败才提示未安装。
                 try {
-                    if (!conn.getAppState().await()) {
-                        connState = "池鱼单词未安装"
-                        connDesc = "请先在手环安装「池鱼单词」"
-                        imgSrc = R.drawable.conn_question
-                        return
-                    }
+                    conn.openApp()
                 } catch (e: Exception) {
-                    connState = "池鱼单词未安装"
-                    connDesc = "请先在手环安装「池鱼单词」"
+                    connState = "池鱼单词未安装或无法打开"
+                    connDesc = "请确认手环已安装「池鱼单词」后重试"
                     imgSrc = R.drawable.conn_question
                     return
                 }
-                conn.openApp()
                 connState = "设备连接成功"
                 connDesc = "$deviceName 已连接"
                 imgSrc = R.drawable.conn_true

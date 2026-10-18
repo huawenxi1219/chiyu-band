@@ -31,6 +31,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.min
 
 /**
@@ -47,6 +53,35 @@ class WordPushActivity : ComponentActivity() {
         val count: Int = 0,
         val total: Int = 0
     )
+
+    /** 解析词表文件：兼容三种形态 + 两种字段命名
+     *  形态：JSONL（每行一词）、JSON 数组、{words:[...]} 对象
+     *  字段：手环协议(w/m) 或 池鱼Study 原格式(word/meaning)
+     */
+    private fun parseWordList(text: String): List<HttpBridge.WordItem> {
+        val trimmed = text.trim()
+        val objects: List<JsonObject> = when {
+            trimmed.startsWith("[") ->
+                json.parseToJsonElement(trimmed).jsonArray.map { it.jsonObject }
+            trimmed.startsWith("{") && trimmed.contains("\n") ->
+                text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    .map { json.parseToJsonElement(it).jsonObject }
+            else -> {
+                val payload = json.parseToJsonElement(trimmed).jsonObject
+                payload["words"]?.jsonArray?.map { it.jsonObject } ?: listOf(payload)
+            }
+        }
+        return objects.map { obj ->
+            if (obj.containsKey("w")) {
+                json.decodeFromJsonElement<HttpBridge.WordItem>(obj)
+            } else {
+                HttpBridge.WordItem(
+                    w = obj["word"]?.jsonPrimitive?.contentOrNull ?: "",
+                    m = obj["meaning"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            }
+        }.filter { it.w.isNotBlank() }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -117,11 +152,7 @@ class WordPushActivity : ComponentActivity() {
                 words = withContext(Dispatchers.IO) {
                     try {
                         val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-                        when {
-                            text.trimStart().startsWith("[") ->
-                                json.decodeFromString<List<HttpBridge.WordItem>>(text)
-                            else -> json.decodeFromString<HttpBridge.WordListPayload>(text).words
-                        }
+                        parseWordList(text)
                     } catch (e: Exception) {
                         emptyList()
                     }
