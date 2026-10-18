@@ -158,12 +158,13 @@ class MainActivity : ComponentActivity() {
                                     }
                                     val intent = Intent(this@MainActivity, WordPushActivity::class.java)
                                         .setData(fileuri)
+                                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                     startActivity(intent)
                                 }
                             )
                             NormalButton(
                                 text = "重新选择",
-                                onClick = { filePicker.launch(arrayOf("application/json", "text/plain")) }
+                                onClick = { filePicker.launch(arrayOf("*/*")) }
                             )
                         }
                     }
@@ -293,7 +294,7 @@ class MainActivity : ComponentActivity() {
                 if (isFileSelected) {
                     Toast.makeText(this, FileUtils.getRealPath(this, fileuri), Toast.LENGTH_SHORT).show()
                 } else {
-                    filePicker.launch(arrayOf("application/json", "text/plain"))
+                    filePicker.launch(arrayOf("*/*"))
                 }
             }
         )
