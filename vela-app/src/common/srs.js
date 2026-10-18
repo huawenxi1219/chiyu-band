@@ -83,29 +83,66 @@ function dwellFactor(dwell) {
   return 0.9
 }
 
+// 把 "YYYY-MM-DD HH:MM:SS" 转时间戳
+function tsFromStr(s) {
+  var m = /(\d+)-(\d+)-(\d+) (\d+):(\d+):(\d+)/.exec(s)
+  if (!m) return NaN
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime()
+}
+
+// 估算用户使用频率：最近学习记录之间隔的中位数（小时）
+// 一天多次 → 几小时；几天一次 → 几十小时。据此动态定基础间隔。
+function estimateGapHours(records) {
+  var tsList = []
+  for (var i = 0; i < records.length; i++) {
+    var t = records[i] && records[i].t
+    if (!t) continue
+    var ts = tsFromStr(t)
+    if (!isNaN(ts)) tsList.push(ts)
+  }
+  if (tsList.length < 2) return null
+  tsList.sort(function (a, b) { return a - b })
+  var gaps = []
+  for (var j = 1; j < tsList.length; j++) gaps.push((tsList[j] - tsList[j - 1]) / 3600000)
+  gaps.sort(function (a, b) { return a - b })
+  var mid = gaps[Math.floor(gaps.length / 2)]
+  return Math.max(0.1, mid)
+}
+
+// 基础间隔（小时）：由使用频率映射 —— 高频用户几小时复习一次，低频用户几天一次
+function baseIntervalHours(gap) {
+  if (!gap) return 24          // 无记录：默认一天一次
+  if (gap <= 6) return 3       // 每天多次 → 3 小时（上午看中午巩固）
+  if (gap <= 24) return 8      // 每天一次 → 8 小时
+  if (gap <= 72) return 24     // 隔几天 → 1 天
+  return 48                    // 低频 → 2 天
+}
+
 // 更新一个词：action = know | forget | fuzzy
-// opts: { rt: 看单词反应毫秒, dwell: 释义停留毫秒 } —— 结合停留时间综合评判
+// opts: { rt: 看单词反应毫秒, dwell: 释义停留毫秒, gap: 使用频率小时 }
+// 间隔为"天"（可小数，如 0.125 天 = 3 小时），next 精确到毫秒
 function updateWord(w, action, opts) {
   norm(w)
   w.c = w.c || 0
   w.wc = w.wc || 0
   var rt = opts && opts.rt
   var dwell = opts && opts.dwell
+  var gap = opts && opts.gap
   var f = rtFactor(rt) * dwellFactor(dwell)
+  var base = baseIntervalHours(gap) / 24
   if (action === 'know') {
     w.c++
     w.lvl = Math.min(8, w.lvl + 1)
-    if (w.i <= 0) w.i = 1
-    else if (w.i === 1) w.i = Math.max(2, Math.round(3 * f))
-    else w.i = Math.max(2, Math.round(w.i * w.e * f))
+    if (w.i <= 0) w.i = base
+    else w.i = Math.max(base, w.i * w.e * f)
     w.e = Math.min(3.0, w.e + 0.1)
   } else if (action === 'fuzzy') {
-    w.i = Math.max(1, Math.round(w.i * 0.5 * f))
+    w.i = Math.max(base * 0.5, w.i * 0.5 * f)
     w.e = Math.max(1.3, w.e - 0.1)
     w.lvl = Math.max(0, w.lvl - 1)
   } else { // forget
     w.wc++
-    w.i = 1
+    w.i = base                 // 按使用频率重置（高频几小时再问，低频几天再问）
     w.e = Math.max(1.3, w.e - 0.2)
     w.lvl = Math.max(0, w.lvl - 2)
   }
@@ -125,5 +162,7 @@ export default {
   retention: retention,
   urgency: urgency,
   pickBatch: pickBatch,
-  updateWord: updateWord
+  updateWord: updateWord,
+  estimateGapHours: estimateGapHours,
+  baseIntervalHours: baseIntervalHours
 }
