@@ -42,24 +42,6 @@ class WordPushActivity : ComponentActivity() {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Serializable
-    data class WordItem(
-        val w: String,
-        val m: String = "",
-        val e: Double = 2.5,
-        val i: Int = 0,
-        val lvl: Int = 0,
-        val c: Int = 0,
-        val wc: Int = 0,
-        val next: Long = 0
-    )
-
-    @Serializable
-    data class WordListPayload(
-        val version: Int = 1,
-        val words: List<WordItem> = emptyList()
-    )
-
-    @Serializable
     data class AckPayload(
         val tag: String = "",
         val count: Int = 0,
@@ -109,7 +91,7 @@ class WordPushActivity : ComponentActivity() {
                 return@LaunchedEffect
             }
 
-            val words: List<WordItem>
+            val words: List<HttpBridge.WordItem>
             if (httpMode) {
                 // 一键模式：从池鱼Study本地服务直接拉词表，无需选文件
                 val scope = intent.getStringExtra("scope") ?: "due"
@@ -137,8 +119,8 @@ class WordPushActivity : ComponentActivity() {
                         val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
                         when {
                             text.trimStart().startsWith("[") ->
-                                json.decodeFromString<List<WordItem>>(text)
-                            else -> json.decodeFromString<WordListPayload>(text).words
+                                json.decodeFromString<List<HttpBridge.WordItem>>(text)
+                            else -> json.decodeFromString<HttpBridge.WordListPayload>(text).words
                         }
                     } catch (e: Exception) {
                         emptyList()
