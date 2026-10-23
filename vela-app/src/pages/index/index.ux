@@ -19,10 +19,11 @@
 		</div>
 
 		<!-- 背单词：单词卡（左滑=认识 上滑=模糊 下滑=不会 右滑=退出） -->
-		<div if="{{mode === 'study'}}" class="card animIn">
+		<div if="{{mode === 'study'}}" class="card {{animClass}}">
 			<div class="miniExit" @click="exitApp"><text class="miniExitText">退</text></div>
+			<div class="prog"><div class="progFill" style="width: {{progPct}}%"></div></div>
 			<text class="word">{{curWord.w}}</text>
-			<text class="pos">已学 {{idx}} · 词库 {{totalCount}}</text>
+			<text class="pos">{{roundDone}}/{{totalCount}} · 词库共 {{totalCount}}</text>
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
@@ -39,6 +40,7 @@
 		<div if="{{mode === 'done'}}" class="card animIn">
 			<text class="title2">本轮完成</text>
 			<text class="stat">认识 {{statK}} · 模糊 {{statF}} · 不会 {{statN}}</text>
+			<text if="{{retryCount > 0}}" class="stat2">其中 {{retryCount}} 词复考巩固</text>
 			<div class="btn" @click="startRound">
 				<text class="btnText">再来一轮</text>
 			</div>
@@ -74,6 +76,14 @@ export default {
 		meaningStart: 0,   // 释义显示时刻（用于算停留时间）
 		pendingRec: null,  // 待补 dwell 的记录
 		gapHours: 24,      // 用户使用频率（小时），打开时估算，决定基础复习间隔
+		animClass: 'animIn', // 卡片动画：animIn | flyL | flyU | flyD
+		choosing: false,     // 防连点：滑动选词动画期间的输入锁
+		roundDone: 0,      // 本轮已答题数（含复考）
+		progPct: 0,        // 本轮进度 %
+		retryQueue: [],    // 轮内复考队列（选"不会/模糊"的词）
+		retryCounts: {},   // 词 → 本轮已复考次数（上限 2 次，防循环）
+		sinceRetry: 0,     // 距上次复考已走了几步（每 2 步插一次复考）
+		retryCount: 0,     // 本轮实际复考次数
 		debug: ''
 	},
 	touch: { sx: 0, sy: 0, active: false },
@@ -115,6 +125,14 @@ export default {
 		this.statF = 0
 		this.statN = 0
 		this.pendingRec = null
+		this.roundDone = 0
+		this.progPct = 0
+		this.retryQueue = []
+		this.retryCounts = {}
+		this.sinceRetry = 0
+		this.retryCount = 0
+		this.choosing = false
+		this.animClass = 'animIn'
 		var first = srs.pickNextAll(this.words, this.answered)
 		if (!first) {
 			this.debug = '词库为空，请先用手机同步'
@@ -190,6 +208,8 @@ export default {
 	},
 
 	choose(action, rt) {
+		if (this.choosing) return
+		this.choosing = true
 		// 先更新 SRS（含反应时间 + 使用频率），记录暂存，释义停留后补 dwell 再落盘
 		var rec = srs.updateWord(this.curWord, action, { rt: rt, gap: this.gapHours })
 		this.pendingRec = rec
@@ -197,10 +217,33 @@ export default {
 		else if (action === 'fuzzy') this.statF++
 		else this.statN++
 		this.lastActText = action === 'know' ? '认识 ✓' : (action === 'fuzzy' ? '模糊 ~' : '不会 ✗')
-		this.showMeaning()
+		this.roundDone++
+		this.progPct = Math.min(100, Math.round(this.roundDone / this.totalCount * 100))
+		// 轮内复考：选"不会/模糊"的词进队列，每走 2 步插回来再考一次（同词最多复考 2 次）
+		if (action !== 'know') {
+			var key = (this.curWord.w || '').toLowerCase()
+			var done = this.retryCounts[key] || 0
+			if (done < 2) {
+				var inQueue = false
+				for (var q = 0; q < this.retryQueue.length; q++) {
+					if (this.retryQueue[q].key === key) { inQueue = true; break }
+				}
+				if (!inQueue) {
+					this.retryQueue.push({ key: key, word: this.curWord, times: 1 })
+				}
+			}
+		}
+		// 滑动方向飞出动画（左=认识 上=模糊 下=不会），动画结束后进释义页
+		this.animClass = action === 'know' ? 'flyL' : (action === 'fuzzy' ? 'flyU' : 'flyD')
+		var that = this
+		setTimeout(function () {
+			that.animClass = 'animIn'
+			that.showMeaning()
+		}, 280)
 	},
 
 	showMeaning() {
+		this.choosing = false
 		this.mode = 'meaning'
 		this.meaningStart = Date.now()
 	},
@@ -217,7 +260,23 @@ export default {
 			})
 			this.pendingRec = null
 		}
-		this.answered[this.curWord.w] = true
+		this.answered[this.curWord.w.toLowerCase()] = true
+		// 轮内复考：每走 2 步，从队列取一个"不会/模糊"的词回来再考
+		// 复考时更新 SRS 状态（第二次作答更准），答对即出队，仍不会继续排队（最多 2 次）
+		this.sinceRetry++
+		if (this.retryQueue.length && this.sinceRetry >= 2) {
+			var rw = this.retryQueue.shift()
+			this.sinceRetry = 0
+			this.retryCount++
+			this.retryCounts[rw.key] = (this.retryCounts[rw.key] || 0) + 1
+			this.curWord = rw.word
+			this.studyStart = Date.now()
+			this.mode = 'study'
+			this.animClass = 'animIn'
+			this.debug = '复考:' + rw.key
+			return
+		}
+		this.debug = ''
 		// 全库动态选词：排除已答，从整个词库挑当下最紧急的一个
 		// 每个词独立计算（遗忘曲线+熟练度+错次+刚更新的状态），轻微随机防同序
 		var next = srs.pickNextAll(this.words, this.answered)
@@ -226,6 +285,7 @@ export default {
 			this.curWord = next
 			this.studyStart = Date.now()
 			this.mode = 'study'
+			this.animClass = 'animIn'
 		} else {
 			// 整个词库学完一遍
 			this.idx = this.words.length
@@ -255,6 +315,40 @@ export default {
 
 .animIn {
 	animation: popIn 0.3s cubic-bezier(0.18, 0.86, 0.34, 1);
+}
+
+/* 三向飞出动画：左=认识 上=模糊 下=不会（AstroBox 式滑动反馈） */
+@keyframes flyL {
+	to { transform: translateX(-240px); opacity: 0; }
+}
+
+@keyframes flyU {
+	to { transform: translateY(-560px); opacity: 0; }
+}
+
+@keyframes flyD {
+	to { transform: translateY(560px); opacity: 0; }
+}
+
+.flyL { animation: flyL 0.28s ease-out; }
+.flyU { animation: flyU 0.28s ease-out; }
+.flyD { animation: flyD 0.28s ease-out; }
+
+/* 本轮进度条（答题卡顶部细条） */
+.prog {
+	position: absolute;
+	top: 12px;
+	left: 16px;
+	width: 164px;
+	height: 4px;
+	border-radius: 2px;
+	background-color: rgba(255, 255, 255, 0.08);
+}
+
+.progFill {
+	height: 4px;
+	border-radius: 2px;
+	background-color: #1781FF;
 }
 
 .home {
@@ -327,10 +421,10 @@ export default {
 }
 
 .mean {
-	font-size: 28px;
+	font-size: 26px;
 	color: #CCCCCC;
 	text-align: center;
-	lines: 4;
+	lines: 6;
 	text-overflow: clip;
 	margin-left: 16px;
 	margin-right: 16px;
