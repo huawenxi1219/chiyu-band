@@ -234,7 +234,11 @@ class WordPushActivity : ComponentActivity() {
                 }
                 btnText = "完成"
             } catch (e: Exception) {
-                statusText = "推送失败：${e.message ?: "未知错误"}"
+                statusText = if ((e.message ?: "").contains("握手")) {
+                    "手环端未就绪，请先在手表上打开「池鱼单词」再重试"
+                } else {
+                    "推送失败：${e.message ?: "未知错误"}"
+                }
                 imgSrc = R.drawable.fail
                 btnText = "返回"
             }

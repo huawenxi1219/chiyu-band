@@ -10,6 +10,7 @@
 				<div class="btn" @click="startRound">
 					<text class="btnText">开始背单词</text>
 				</div>
+				<text if="{{debug}}" class="dbg">{{debug}}</text>
 				<text class="hint2">右滑退出 · 连手机可同步词库</text>
 				<div class="btnExit" @click="exitApp">
 					<text class="btnExitText">退出</text>
@@ -19,6 +20,7 @@
 
 		<!-- 背单词：单词卡（左滑=认识 上滑=模糊 下滑=不会 右滑=退出） -->
 		<div if="{{mode === 'study'}}" class="card animIn">
+			<div class="miniExit" @click="exitApp"><text class="miniExitText">退</text></div>
 			<text class="word">{{curWord.w}}</text>
 			<text class="pos">已学 {{idx}} · 词库 {{totalCount}}</text>
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
@@ -26,6 +28,7 @@
 
 		<!-- 释义页（轻点继续，右滑退出） -->
 		<div if="{{mode === 'meaning'}}" class="card animIn">
+			<div class="miniExit" @click="exitApp"><text class="miniExitText">退</text></div>
 			<text class="word">{{curWord.w}}</text>
 			<text class="mean">{{curWord.m}}</text>
 			<text class="actText">{{lastActText}}</text>
@@ -44,8 +47,6 @@
 			</div>
 			<text class="hint2">右滑退出</text>
 		</div>
-
-		<text class="debug">{{debug}}</text>
 	</div>
 </template>
 
@@ -79,6 +80,8 @@ export default {
 
 	onShow() {
 		this.reloadWords()
+		// 手环端应用就绪后主动回报握手（配合手机端推送前等待，防止启动慢丢消息）
+		try { globalThis.conn && globalThis.conn.send('__hs__', { count: 1 }) } catch (e) { }
 		// 打开时估算使用频率，让算法动态定基础间隔（高频→几小时巩固）
 		var that = this
 		storage.get('records', []).then(function (recs) {
@@ -394,11 +397,31 @@ export default {
 	font-weight: bold;
 }
 
-.debug {
+/* 词库为空等提示：卡片内流式红字（限宽防横向溢出，绝不遮挡退出键） */
+.dbg {
 	font-size: 18px;
 	color: #CC4444;
+	margin-top: 16px;
+	width: 180px;
+	text-align: center;
+}
+
+/* 答题/释义页右上角小退出按钮（任何状态下都有显式出口） */
+.miniExit {
 	position: absolute;
-	top: 460px;
-	left: 10px;
+	top: 10px;
+	right: 10px;
+	width: 40px;
+	height: 40px;
+	border-radius: 20px;
+	background-color: rgba(255, 255, 255, 0.10);
+	align-items: center;
+	justify-content: center;
+}
+
+.miniExitText {
+	font-size: 20px;
+	color: #AAAAAA;
+	font-weight: bold;
 }
 </style>

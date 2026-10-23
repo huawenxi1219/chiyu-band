@@ -70,35 +70,47 @@ class InterHandshake(context: Context,val scope: CoroutineScope) : Interconn(con
                 completeExceptionally(e)
             }
             scope.launch {
-                if(!connected)
-                if (promise != null) {
-                    promise?.await()
-                } else {
-                    // 初始化握手流程
-                    promise = CompletableDeferred<Unit>().apply {
-                        val timeoutCb = Runnable {
-                            promise = null
-                            resolve = null
-                            connected = false
-                            cpe(Exception("握手超时"))
+                if(!connected) {
+                    if (promise != null) {
+                        promise?.await()
+                    } else {
+                        // 初始化握手流程：手环端应用刚被拉起时可能未就绪，
+                        // 首条握手消息丢失后自动重发（最多 3 次，每次 3s）
+                        var attempts = 0
+                        promise = CompletableDeferred<Unit>().apply {
+                            val timeoutCb = object : Runnable {
+                                override fun run() {
+                                    attempts++
+                                    if (attempts < 3) {
+                                        // 手环端可能仍在启动，重发握手
+                                        super@InterHandshake.sendMessage("{\"tag\":\"$TYPE\",\"count\":0}")
+                                        handler.postDelayed(this, TIMEOUT)
+                                    } else {
+                                        attempts = 0
+                                        promise = null
+                                        resolve = null
+                                        connected = false
+                                        cpe(Exception("手环端未就绪（握手超时）"))
+                                    }
+                                }
+                            }
+                            handler.postDelayed(timeoutCb, TIMEOUT)
+                            resolve = {
+                                attempts = 0
+                                complete(Unit)
+                                handler.removeCallbacks(timeoutCb)
+                                connected = true
+                            }
+                            // 发送初始握手消息（count=0）
+                            super@InterHandshake.sendMessage("{\"tag\":\"$TYPE\",\"count\":0}").await()
                         }
-                        handler.postDelayed(timeoutCb, TIMEOUT)
-                        resolve = {
-                            complete(Unit)
-                            Log.i("handShake","success")
-                            handler.removeCallbacks(timeoutCb)
-                            connected = true
-                        }
-                        // 发送初始握手消息（count=0）
-                        super.sendMessage("{\"tag\":\"$TYPE\",\"count\":0}").await()
+                        promise?.await()
                     }
-                    promise?.await()
                 }
                 complete(super.sendMessage(message).await())
             }
         }
         // 等待握手完成
-
     }
 
     @Serializable
