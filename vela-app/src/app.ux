@@ -6,6 +6,13 @@ import brightness from '@system.brightness'
 
 globalThis.conn = new Interconn()
 
+// 应用启动后短暂保持常亮（兜底窗口）：手机端 openApp 拉起本应用后屏幕极易熄
+// 灭，熄屏后 interconnect 消息收不到；保持 10 秒亮屏等推送开始指令到达
+try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+setTimeout(function () {
+  try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+}, 10000)
+
 // 握手协议（与手机端"池鱼手环同步"约定一致）
 globalThis.conn.on('__hs__', (payload) => {
   const count = (payload && payload.count) || 0

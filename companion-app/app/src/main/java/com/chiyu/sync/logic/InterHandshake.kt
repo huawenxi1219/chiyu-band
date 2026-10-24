@@ -47,13 +47,13 @@ class InterHandshake(context: Context,val scope: CoroutineScope) : Interconn(con
 
             // 处理握手计数逻辑
             if (currentCount > 0) {
-                if (promise != null) {
+                // 仅在推送流程正在主动等待握手（resolve != null）时才完成；
+                // 手环端主动发起的握手（应用刚打开时回报）不创建 promise，避免污染等待状态
+                if (resolve != null) {
                     resolve?.invoke()
                     resolve = null
                     promise = null
                     onConnected.invoke()
-                } else {
-                    promise = CompletableDeferred(Unit)
                 }
             }
 

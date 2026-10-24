@@ -220,14 +220,23 @@ class WordPushActivity : ComponentActivity() {
                     readyGate?.complete(Unit)
                 }
 
-                // 1. 通知手环端开始接收（重置接收状态），等手环端就绪确认
-                val rg = CompletableDeferred<Unit>()
-                readyGate = rg
-                conn.sendMessage("""{"tag":"word_push_start","total":$total}""").await()
-                if (withTimeoutOrNull(6000) { rg.await() } == null) {
-                    throw Exception("手环端未响应：请确认手环上已装新版「池鱼单词」(v0.3) 且保持屏幕点亮/应用在前台")
+                // 1. 通知手环端开始接收（重置接收状态），等手环端就绪确认；
+                //    超时自动重新拉起手环应用（屏幕亮起）再重试，最多 3 次
+                var readyOk = false
+                for (attempt in 0 until 3) {
+                    val rg = CompletableDeferred<Unit>()
+                    readyGate = rg
+                    conn.sendMessage("""{"tag":"word_push_start","total":$total}""").await()
+                    val got = withTimeoutOrNull(6000) { rg.await() }
+                    readyGate = null
+                    if (got != null) { readyOk = true; break }
+                    statusText = "手环端未就绪，第 ${attempt + 1} 次尝试拉起应用..."
+                    try { conn.openApp().await() } catch (e: Exception) { }
+                    delay(1200)
                 }
-                readyGate = null
+                if (!readyOk) {
+                    throw Exception("手环端未响应：请确认手环上已装新版「池鱼单词」(v0.4) 且保持屏幕点亮/应用在前台")
+                }
 
                 // 2. 逐块确认发送：cur = 下一个要发的块序号
                 var cur = 0
