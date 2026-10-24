@@ -204,20 +204,17 @@ class MainActivity : ComponentActivity() {
                 val deviceName = conn.connect().await().replace(" ", "")
                 conn.auth()
                 conn.registerListener().await()   // 修复：注册消息监听，握手/记录回传才能收到
-                // 说明：isWearAppInstalled 对 AstroBox 侧载的应用不可靠（会误报未安装），
-                // 不再做安装预检，直接尝试打开手环端应用，打开失败才提示未安装。
-                try {
-                    conn.openApp()
-                } catch (e: Exception) {
-                    connState = "无法自动打开手表端应用"
-                    connDesc = "请在手表上手动打开「池鱼单词」，再回来点我重试"
-                    imgSrc = R.drawable.conn_question
-                    return
-                }
                 connState = "设备连接成功"
                 connDesc = "$deviceName 已连接"
                 imgSrc = R.drawable.conn_true
                 isConnected = true
+                // 自动拉起手环端应用：AstroBox 侧载的快应用无法用 launchWearApp 拉起，
+                // 失败只作提示（请手动打开），不再把整个连接误判为失败。
+                try {
+                    conn.openApp()
+                } catch (e: Exception) {
+                    connDesc = "$deviceName 已连接（请在手表上手动打开「池鱼单词」）"
+                }
             } catch (e: Exception) {
                 Log.e("init", "connect fail ${e.message}")
                 imgSrc = R.drawable.conn_false
