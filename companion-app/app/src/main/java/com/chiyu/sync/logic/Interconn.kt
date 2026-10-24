@@ -17,6 +17,7 @@ open class Interconn(context: Context){
     val authApi: AuthApi = getAuthApi(context)
     val messageApi: MessageApi = getMessageApi(context)
     var currentNode: Node? = null
+    private var listenerRegistered = false   // 消息监听已注册标记：SDK 重复注册会报 "you have registered"
     val json=Json{
         ignoreUnknownKeys = true
     }
@@ -81,8 +82,13 @@ open class Interconn(context: Context){
         }
     }
     fun registerListener(): CompletableDeferred<Unit> {
+        // 幂等：已注册过就直接成功返回，避免 SDK 抛 "you have registered"
+        if (listenerRegistered) {
+            return CompletableDeferred<Unit>().apply { complete(Unit) }
+        }
         return CompletableDeferred<Unit>().apply {
             messageApi.addListener(currentNode!!.id,onMessageListener).addOnSuccessListener {
+                listenerRegistered = true
                 complete(Unit)
             }.addOnFailureListener { completeExceptionally(it) }
         }
@@ -119,6 +125,7 @@ open class Interconn(context: Context){
             if (currentNode==null) complete(Unit)
             else{
                 messageApi.removeListener(currentNode!!.id).addOnSuccessListener {
+                    listenerRegistered = false
                     currentNode=null
                     complete(Unit)
                 }.addOnFailureListener {
