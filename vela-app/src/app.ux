@@ -48,13 +48,14 @@ globalThis.conn.on('__hs__', (payload) => {
 // writeText 的 append/覆盖行为在本环境不可靠，曾导致词库文件为空）
 const pushState = { expected: 0, recvCount: 0, total: -1 }
 
-// 字符串 → UTF-16LE ArrayBuffer（与喵喵 str2abWrite 一致：JS 字符串本身是 UTF-16）
+// 字符串 → UTF-16LE Uint8Array（与喵喵 str2abWrite 完全一致：
+// 必须返回 Uint8Array，直接传 ArrayBuffer 会被 Vela file API 抛 TypeError）
 function str2abUtf16(str) {
   var array = new Uint16Array(str.length)
   for (var i = 0; i < str.length; i++) {
     array[i] = str.charCodeAt(i)
   }
-  return array.buffer
+  return new Uint8Array(array.buffer)
 }
 
 // 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
@@ -204,9 +205,27 @@ globalThis.conn.on('word_push', (payload) => {
         globalThis.diag('push', 'ack ' + pushState.expected)
       }
     }).catch(function (e) {
-      // 写盘失败：打点并仍回确认（避免链路卡死，词条下次推送补齐）
+      // 写盘失败：记录并跳过该块（不卡死链路），继续推进序号
       globalThis.diag('push', 'WRITE ERR ' + e)
-      globalThis.conn.send('push_next', { count: pushState.expected })
+      pushState.expected++
+      pushState.recvCount += words.length
+      if (pushState.expected >= pushState.total) {
+        globalThis.diag('push', 'all received ' + pushState.recvCount + ' (partial), merging')
+        finalizePush().then(function (n) {
+          try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e2) { }
+          globalThis.conn.send('push_done', { count: pushState.recvCount, total: n })
+          globalThis.diag('push', 'done, saved ' + n)
+          try { storage.set('words_ver', Date.now()) } catch (e2) { }
+          pushState.expected = 0
+          pushState.recvCount = 0
+          pushState.total = -1
+        }).catch(function (e2) {
+          globalThis.diag('push', 'MERGE ERR ' + e2)
+          globalThis.conn.send('push_done', { count: pushState.recvCount, total: -1 })
+        })
+      } else {
+        globalThis.conn.send('push_next', { count: pushState.expected })
+      }
     })
   } catch (e) { globalThis.diag('push', 'ERR ' + e) }
 })
