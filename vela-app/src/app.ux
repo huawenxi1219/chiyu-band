@@ -6,6 +6,19 @@ import brightness from '@system.brightness'
 
 globalThis.conn = new Interconn()
 
+// 诊断日志：记录每条关键消息（首页会实时显示，定位推送卡点）
+globalThis.__diag = []
+globalThis.diag = function (tag, msg) {
+  try {
+    var d = new Date()
+    var h = d.getHours(), m = d.getMinutes(), s = d.getSeconds()
+    var ts = (h < 10 ? '0' + h : h) + ':' + (m < 10 ? '0' + m : m) + ':' + (s < 10 ? '0' + s : s)
+    globalThis.__diag.push(ts + ' ' + tag + (msg ? ' ' + msg : ''))
+    if (globalThis.__diag.length > 24) globalThis.__diag.shift()
+  } catch (e) { }
+}
+globalThis.diag('app', 'started')
+
 // 应用启动后短暂保持常亮（兜底窗口）：手机端 openApp 拉起本应用后屏幕极易熄
 // 灭，熄屏后 interconnect 消息收不到；保持 10 秒亮屏等推送开始指令到达
 try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
@@ -16,6 +29,7 @@ setTimeout(function () {
 // 握手协议（与手机端"池鱼手环同步"约定一致）
 globalThis.conn.on('__hs__', (payload) => {
   const count = (payload && payload.count) || 0
+  globalThis.diag('hs', 'count=' + count)
   if (count < 2) {
     globalThis.conn.send('__hs__', { count: count + 1 })
   }
@@ -31,25 +45,30 @@ globalThis.conn.on('word_push_start', (payload) => {
     pushState.chunks = {}
     pushState.expected = 0
     pushState.total = (payload && payload.total) || 0
+    globalThis.diag('start', 'total=' + pushState.total)
     // 强制屏幕常亮：手环应用熄屏/后台时收不到 interconnect 消息，必须保持前台
     try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
     globalThis.conn.send('push_ready', { ok: true, total: pushState.total })
-  } catch (e) { }
+    globalThis.diag('start', 'sent push_ready')
+  } catch (e) { globalThis.diag('start', 'ERR ' + e) }
 })
 
 globalThis.conn.on('word_push', (payload) => {
   try {
     const batch = (payload && payload.batch) || 0
     const words = (payload && payload.words) || []
+    globalThis.diag('push', 'batch=' + batch + ' exp=' + pushState.expected + ' words=' + words.length)
     // 序号对不上 = 缺块，请求手机端重发当前期望序号
     if (batch !== pushState.expected) {
       globalThis.conn.send('push_next', { count: pushState.expected })
+      globalThis.diag('push', 'mismatch, req ' + pushState.expected)
       return
     }
     pushState.chunks[batch] = words
     pushState.expected++
     if (pushState.expected >= pushState.total) {
       // 收齐所有分块，合并进本地词库（手机为准，按单词覆盖）
+      globalThis.diag('push', 'all received, merging')
       let merged = []
       for (let i = 0; i < pushState.total; i++) {
         merged = merged.concat(pushState.chunks[i] || [])
@@ -64,6 +83,7 @@ globalThis.conn.on('word_push', (payload) => {
           // 推送完成，恢复自动熄屏
           try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
           globalThis.conn.send('push_done', { count: merged.length, total: obj.words.length })
+          globalThis.diag('push', 'done, saved ' + obj.words.length)
         })
       })
       pushState.chunks = {}
@@ -71,15 +91,18 @@ globalThis.conn.on('word_push', (payload) => {
     } else {
       // 确认已收到本块，请求下一块
       globalThis.conn.send('push_next', { count: pushState.expected })
+      globalThis.diag('push', 'ack ' + pushState.expected)
     }
-  } catch (e) { }
+  } catch (e) { globalThis.diag('push', 'ERR ' + e) }
 })
 
 // 手机请求收回学习记录
 globalThis.conn.on('record_pull', () => {
+  globalThis.diag('pull', 'requested')
   storage.getAll().then(obj => {
     const recs = obj.records || []
     globalThis.conn.send('record_back', { records: recs })
+    globalThis.diag('pull', 'sent ' + recs.length)
     obj.records = []   // 发送后清空本地
     storage.saveAll(obj)
   })

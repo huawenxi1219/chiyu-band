@@ -5,13 +5,14 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.5</text>
+				<text class="ver">v0.6</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
 					<text class="btnText">开始背单词</text>
 				</div>
 				<text if="{{debug}}" class="dbg">{{debug}}</text>
+				<text if="{{diagText}}" class="diag">{{diagText}}</text>
 				<text class="hint2">右滑退出 · 连手机可同步词库</text>
 				<div class="btnExit" @click="exitApp">
 					<text class="btnExitText">退出</text>
@@ -85,7 +86,9 @@ export default {
 		retryCounts: {},   // 词 → 本轮已复考次数（上限 2 次，防循环）
 		sinceRetry: 0,     // 距上次复考已走了几步（每 2 步插一次复考）
 		retryCount: 0,     // 本轮实际复考次数
-		debug: ''
+		debug: '',
+		diagText: '',      // 诊断日志（推送排障时显示）
+		diagTimer: null
 	},
 	touch: { sx: 0, sy: 0, active: false },
 
@@ -98,6 +101,17 @@ export default {
 		storage.get('records', []).then(function (recs) {
 			that.gapHours = srs.estimateGapHours(recs)
 		})
+		// 诊断日志轮询：每 500ms 把 app.ux 记录的收发事件刷到屏幕（定位推送卡点）
+		this.diagTimer = setInterval(function () {
+			var arr = globalThis.__diag || []
+			if (arr.length) {
+				that.diagText = arr.slice(arr.length - 5).join('\n')
+			}
+		}, 500)
+	},
+
+	onHide() {
+		if (this.diagTimer) { clearInterval(this.diagTimer); this.diagTimer = null }
 	},
 
 	reloadWords() {
@@ -505,6 +519,16 @@ export default {
 	margin-top: 16px;
 	width: 180px;
 	text-align: center;
+}
+
+/* 诊断日志（小号灰色，多行，推送排障用） */
+.diag {
+	font-size: 16px;
+	color: #8A8A8A;
+	margin-top: 8px;
+	width: 180px;
+	lines: 5;
+	text-overflow: clip;
 }
 
 /* 答题/释义页右上角小退出按钮（任何状态下都有显式出口） */

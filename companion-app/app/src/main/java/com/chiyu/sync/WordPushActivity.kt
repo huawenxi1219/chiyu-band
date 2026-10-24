@@ -265,7 +265,7 @@ class WordPushActivity : ComponentActivity() {
                         }
                         append("]}")
                     }
-                    statusText = "正在推送 ${cur + 1}/$total 块，等待手环确认..."
+                    statusText = "正在推送 ${cur + 1}/$total 块 [${sub.size}词 ${payload.toByteArray().size}B]，等待手环确认..."
                     conn.sendMessage(payload).await()
                     val g = CompletableDeferred<Int>()
                     gate = g
