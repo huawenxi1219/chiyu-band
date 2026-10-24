@@ -128,10 +128,18 @@ class WordPushActivity : ComponentActivity() {
 
             val words: List<HttpBridge.WordItem>
             if (httpMode) {
-                // 一键模式：从池鱼Study本地服务直接拉词表，无需选文件
+                // 一键模式：先确认池鱼Study 本地服务在线，再拉词表
                 val scope = intent.getStringExtra("scope") ?: "due"
                 val count = intent.getIntExtra("count", 50)
                 filename = "池鱼Study · 一键推送"
+                statusText = "正在检查池鱼Study..."
+                val serverUp = withContext(Dispatchers.IO) { HttpBridge.isServerUp() }
+                if (!serverUp) {
+                    statusText = "⚠ 无法连接池鱼Study：请先打开手机上的池鱼Study，点「🔗 启动本地同步」后再推送"
+                    imgSrc = R.drawable.fail
+                    btnText = "返回"
+                    return@LaunchedEffect
+                }
                 statusText = "正在从池鱼Study拉取词表..."
                 val fetched = withContext(Dispatchers.IO) {
                     HttpBridge.fetchWordlist(scope, count)
@@ -167,9 +175,22 @@ class WordPushActivity : ComponentActivity() {
             wordCount = words.size
             statusText = "已解析 ${words.size} 词，正在连接..."
 
-            // 2. 连接 + 推送
+            // 2. 先检查手环端状态，再推送（每一步都有明确反馈）
             try {
-                conn.init()
+                statusText = "正在检查手环连接..."
+                conn.connect().await()
+                statusText = "已连接 ${conn.currentNode?.name ?: "手环"}，正在验证权限..."
+                conn.auth().await()
+                conn.registerListener().await()   // 注册消息监听：手环的握手/确认才能收到
+                try {
+                    statusText = "正在打开手表端「池鱼单词」..."
+                    conn.openApp().await()
+                } catch (e: Exception) {
+                    statusText = "⚠ 无法自动打开手表端应用：请确认手表上已安装「池鱼单词」并手动打开它，再点一次推送"
+                    imgSrc = R.drawable.conn_question
+                    btnText = "返回"
+                    return@LaunchedEffect
+                }
                 statusText = "连接成功，开始推送..."
                 val chunkSize = 20
                 val total = (words.size + chunkSize - 1) / chunkSize
@@ -235,7 +256,9 @@ class WordPushActivity : ComponentActivity() {
                 btnText = "完成"
             } catch (e: Exception) {
                 statusText = if ((e.message ?: "").contains("握手")) {
-                    "手环端未就绪，请先在手表上打开「池鱼单词」再重试"
+                    "手环端未就绪：请先在手表上打开「池鱼单词」再重试"
+                } else if ((e.message ?: "").contains("未找到设备")) {
+                    "未连接手环：请打开小米运动健康连接你的手环（登录账号需与手环配对）后再重试"
                 } else {
                     "推送失败：${e.message ?: "未知错误"}"
                 }

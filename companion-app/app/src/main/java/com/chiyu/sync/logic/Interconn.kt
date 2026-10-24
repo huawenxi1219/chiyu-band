@@ -121,6 +121,7 @@ open class Interconn(context: Context){
         if(currentNode!=null) return
         connect().await()
         auth().await()
+        registerListener().await()   // 修复：注册消息监听，否则手环的握手/确认消息永远收不到
         openApp().await()
     }
 }

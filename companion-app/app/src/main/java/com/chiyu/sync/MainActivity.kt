@@ -203,13 +203,14 @@ class MainActivity : ComponentActivity() {
                 conn.destroy().await()
                 val deviceName = conn.connect().await().replace(" ", "")
                 conn.auth()
+                conn.registerListener().await()   // 修复：注册消息监听，握手/记录回传才能收到
                 // 说明：isWearAppInstalled 对 AstroBox 侧载的应用不可靠（会误报未安装），
                 // 不再做安装预检，直接尝试打开手环端应用，打开失败才提示未安装。
                 try {
                     conn.openApp()
                 } catch (e: Exception) {
-                    connState = "池鱼单词未安装或无法打开"
-                    connDesc = "请确认手环已安装「池鱼单词」后重试"
+                    connState = "无法自动打开手表端应用"
+                    connDesc = "请在手表上手动打开「池鱼单词」，再回来点我重试"
                     imgSrc = R.drawable.conn_question
                     return
                 }
