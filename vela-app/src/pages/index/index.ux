@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.11</text>
+				<text class="ver">v0.12</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -140,13 +140,11 @@ export default {
 
 	reloadWords() {
 		var that = this
-		// storage 是词库权威（推送合并后的完整词库+学习进度）；文件仅作推送中间载体和兜底
-		storage.get('words', []).then(function (list) {
-			if (list && list.length) {
-				that.applyWords(list)
-				return
-			}
-			// storage 无词（新装/被清）：尝试从词库文件恢复（UTF-16LE 与推送写入一致）
+		// 接收中（手机推送进行时）不加载词库：推送期间零词库占用，
+		// 避免应用被手机 openApp 拉起时一启动就全量解析 3503 词导致 OOM 重启
+		storage.get('receiving', 0).then(function (recv) {
+			if (recv > 0) return
+			// 词库从文件读（手机推送写盘的权威词库）；学习进度（SRS 状态）独立存 storage 'srsmap'
 			try {
 				file.readArrayBuffer({
 					uri: WORDS_URI,
@@ -160,13 +158,13 @@ export default {
 								text += String.fromCharCode(buf[i + 1] * 256 + buf[i])
 							}
 						}
-						var list2 = []
+						var list = []
 						var lines = text.split('\n')
 						for (var k = 0; k < lines.length; k++) {
 							var l = lines[k].trim()
-							if (l) { try { list2.push(JSON.parse(l)) } catch (e) { } }
+							if (l) { try { list.push(JSON.parse(l)) } catch (e) { } }
 						}
-						that.applyWords(list2)
+						that.applyWords(list)
 					},
 					fail: function () {
 						that.applyWords([])
@@ -179,14 +177,26 @@ export default {
 	},
 
 	applyWords(list) {
-		this.words = list || []
-		this.totalCount = this.words.length
-		var due = 0
-		for (var i = 0; i < this.words.length; i++) {
-			var w = srs.norm(this.words[i])
-			if (srs.retention(w) < 0.9) due++
-		}
-		this.dueCount = due
+		var that = this
+		// 合并学习进度：srsmap 里有的词，用手环端已学习的 SRS 状态覆盖手机端初始值
+		storage.get('srsmap', {}).then(function (map) {
+			for (var i = 0; i < list.length; i++) {
+				var w = list[i]
+				var s = map[(w.w || '').toLowerCase()]
+				if (s) {
+					w.e = s.e; w.i = s.i; w.lvl = s.lvl
+					w.c = s.c; w.wc = s.wc; w.next = s.next
+				}
+			}
+			that.words = list || []
+			that.totalCount = that.words.length
+			var due = 0
+			for (var j = 0; j < that.words.length; j++) {
+				var w2 = srs.norm(that.words[j])
+				if (srs.retention(w2) < 0.9) due++
+			}
+			that.dueCount = due
+		})
 	},
 
 	startRound() {
@@ -334,6 +344,12 @@ export default {
 				if (recs.length > 500) recs = recs.slice(recs.length - 500)
 				storage.set('records', recs)
 			})
+			// SRS 学习进度独立落盘（词库与进度分离：推送只替换词库，学习进度永不丢）
+			var cw = this.curWord
+			storage.get('srsmap', {}).then(function (map) {
+				map[(cw.w || '').toLowerCase()] = { e: cw.e, i: cw.i, lvl: cw.lvl, c: cw.c, wc: cw.wc, next: cw.next }
+				storage.set('srsmap', map)
+			})
 			this.pendingRec = null
 		}
 		this.answered[this.curWord.w.toLowerCase()] = true
@@ -363,10 +379,9 @@ export default {
 			this.mode = 'study'
 			this.animClass = 'animIn'
 		} else {
-			// 整个词库学完一遍
+			// 整个词库学完一遍（学习进度已逐词写入 srsmap，无需全量回写词库）
 			this.idx = this.words.length
 			this.mode = 'done'
-			storage.set('words', this.words)
 			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 		}
 	}
