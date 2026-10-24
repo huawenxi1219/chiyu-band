@@ -2,9 +2,13 @@
 // 池鱼单词 - 应用入口：处理与手机的互连（握手 + 词表推送 + 记录回收）
 import Interconn from './common/interconn.js'
 import storage from './common/storage.js'
+import file from '@system.file'
 import brightness from '@system.brightness'
 
 globalThis.conn = new Interconn()
+
+// 词库文件（推送时边收边写，避免收齐后一次性大对象数组驻留内存导致 OOM 重启）
+const WORDS_URI = 'internal://files/chiyu_words.jsonl'
 
 // 诊断日志：记录每条关键消息，写入共享存储（跨应用实例可见，首页轮询显示）
 globalThis.__diag = []
@@ -39,16 +43,102 @@ globalThis.conn.on('__hs__', (payload) => {
 })
 
 // 手机推送词表（可靠分块协议：start→逐块确认→done）
-// 手机端发 word_push_start 通知总数，之后每发一块等手环端 push_next 确认才发下一块，
-// 手环端收齐后落盘并回 push_done —— 与手机端 Interconn 逐块确认逻辑一一对应
-const pushState = { expected: 0, chunks: {}, total: -1 }
+// 推送期间边收边写文件（内存恒定，仿喵喵电子书流式落盘），收齐后合并 SRS 状态再写 storage
+const pushState = { expected: 0, recvCount: 0, total: -1 }
+
+// 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
+function appendWordsToFile(words) {
+  return new Promise(function (resolve, reject) {
+    var text = ''
+    for (var i = 0; i < words.length; i++) {
+      try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
+    }
+    try {
+      file.writeText({
+        uri: WORDS_URI,
+        text: text,
+        append: true,
+        success: resolve,
+        fail: reject
+      })
+    } catch (e) { reject(e) }
+  })
+}
+
+// 推送收齐后：读文件词库 → 与旧库合并（旧词保留手环端已学习的 SRS 状态）→ 写 storage
+// 内存策略：不保留 chunks 对象数组；合并时旧库 parse 一份、新库 parse 一份、结果一份，
+// 比 v0.8（chunks+merged+map+新数组+字符串 5 份驻留）显著下降，最后再 runGC 释放
+function finalizePush() {
+  return new Promise(function (resolve, reject) {
+    try {
+      file.readText({
+        uri: WORDS_URI,
+        success: function (text) {
+          try {
+            var fresh = []
+            var lines = text.split('\n')
+            for (var i = 0; i < lines.length; i++) {
+              var l = lines[i].trim()
+              if (l) { try { fresh.push(JSON.parse(l)) } catch (e) { } }
+            }
+            storage.getAll().then(function (obj) {
+              try {
+                var map = {}
+                var cur = obj.words || []
+                for (var k = 0; k < cur.length; k++) {
+                  var ow = cur[k]
+                  if (ow && ow.w) map[ow.w.toLowerCase()] = ow
+                }
+                var merged = []
+                for (var j = 0; j < fresh.length; j++) {
+                  var nw = fresh[j]
+                  if (!nw || !nw.w) continue
+                  var key = nw.w.toLowerCase()
+                  var old = map[key]
+                  if (old) {
+                    // 保留手环端已学习的 SRS 状态（难度/间隔/熟练度/次数/下次复习）
+                    nw.e = old.e; nw.i = old.i; nw.lvl = old.lvl
+                    nw.c = old.c; nw.wc = old.wc; nw.next = old.next
+                  }
+                  merged.push(nw)
+                }
+                fresh = null
+                lines = null
+                text = null
+                map = null
+                try { global.runGC && global.runGC() } catch (e) { }
+                obj.words = merged
+                storage.saveAll(obj).then(function () {
+                  // 合并结果同步覆盖写回文件，保证文件与 storage 一致（首页优先读文件）
+                  var out = ''
+                  for (var m = 0; m < merged.length; m++) {
+                    try { out += JSON.stringify(merged[m]) + '\n' } catch (e) { }
+                  }
+                  try {
+                    file.writeText({ uri: WORDS_URI, text: out, append: false, success: function () { }, fail: function () { } })
+                  } catch (e) { }
+                  resolve(merged.length)
+                }).catch(function (e) { reject(e) })
+              } catch (e) { reject(e) }
+            }).catch(function (e) { reject(e) })
+          } catch (e) { reject(e) }
+        },
+        fail: reject
+      })
+    } catch (e) { reject(e) }
+  })
+}
 
 globalThis.conn.on('word_push_start', (payload) => {
   try {
-    pushState.chunks = {}
     pushState.expected = 0
+    pushState.recvCount = 0
     pushState.total = (payload && payload.total) || 0
     globalThis.diag('start', 'total=' + pushState.total)
+    // 开始新一轮推送前清空旧词库文件（防半截残留/重复追加）
+    try {
+      file.delete({ uri: WORDS_URI, success: function () { }, fail: function () { } })
+    } catch (e) { }
     // 强制屏幕常亮：手环应用熄屏/后台时收不到 interconnect 消息，必须保持前台
     try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
     globalThis.conn.send('push_ready', { ok: true, total: pushState.total })
@@ -72,35 +162,40 @@ globalThis.conn.on('word_push', (payload) => {
       globalThis.diag('push', 'mismatch, req ' + pushState.expected)
       return
     }
-    pushState.chunks[batch] = words
-    pushState.expected++
-    if (pushState.expected >= pushState.total) {
-      // 收齐所有分块，合并进本地词库（手机为准，按单词覆盖）
-      globalThis.diag('push', 'all received, merging')
-      let merged = []
-      for (let i = 0; i < pushState.total; i++) {
-        merged = merged.concat(pushState.chunks[i] || [])
+    // 边收边写文件（先写盘再回确认，保证块顺序与文件一致）
+    appendWordsToFile(words).then(function () {
+      pushState.expected++
+      pushState.recvCount += words.length
+      // 每 10 块主动垃圾回收（仿喵喵电子书，防内存累积触发系统杀进程）
+      if (pushState.expected % 10 === 0) {
+        try { global.runGC && global.runGC() } catch (e) { }
       }
-      storage.getAll().then(obj => {
-        const map = {}
-        const cur = obj.words || []
-        cur.forEach(x => { if (x && x.w) map[x.w] = x })
-        merged.forEach(x => { if (x && x.w) map[x.w] = x })
-        obj.words = Object.keys(map).map(k => map[k])
-        storage.saveAll(obj).then(() => {
-          // 推送完成，恢复自动熄屏
+      if (pushState.expected >= pushState.total) {
+        // 收齐：合并旧库 SRS → 写 storage → 回 push_done
+        globalThis.diag('push', 'all received ' + pushState.recvCount + ', merging')
+        finalizePush().then(function (n) {
           try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
-          globalThis.conn.send('push_done', { count: merged.length, total: obj.words.length })
-          globalThis.diag('push', 'done, saved ' + obj.words.length)
+          globalThis.conn.send('push_done', { count: pushState.recvCount, total: n })
+          globalThis.diag('push', 'done, saved ' + n)
+          // 通知首页刷新词库
+          try { storage.set('words_ver', Date.now()) } catch (e) { }
+          pushState.expected = 0
+          pushState.recvCount = 0
+          pushState.total = -1
+        }).catch(function (e) {
+          globalThis.diag('push', 'MERGE ERR ' + e)
+          globalThis.conn.send('push_done', { count: pushState.recvCount, total: -1 })
         })
-      })
-      pushState.chunks = {}
-      pushState.total = -1
-    } else {
-      // 确认已收到本块，请求下一块
+      } else {
+        // 确认已收到本块，请求下一块
+        globalThis.conn.send('push_next', { count: pushState.expected })
+        globalThis.diag('push', 'ack ' + pushState.expected)
+      }
+    }).catch(function (e) {
+      // 写盘失败：打点并仍回确认（避免链路卡死，词条下次推送补齐）
+      globalThis.diag('push', 'WRITE ERR ' + e)
       globalThis.conn.send('push_next', { count: pushState.expected })
-      globalThis.diag('push', 'ack ' + pushState.expected)
-    }
+    })
   } catch (e) { globalThis.diag('push', 'ERR ' + e) }
 })
 

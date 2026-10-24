@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.8</text>
+				<text class="ver">v0.9</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -58,9 +58,12 @@
 <script>
 import storage from '../../common/storage.js'
 import srs from '../../common/srs.js'
+import file from '@system.file'
 import brightness from '@system.brightness'
 import app from '@system.app'
 import router from '@system.router'
+
+const WORDS_URI = 'internal://files/chiyu_words.jsonl'
 
 export default {
 	private: {
@@ -90,7 +93,8 @@ export default {
 		debug: '',
 		diag1: '',      // 诊断日志（最近一条，推送排障时显示）
 		diag2: '',      // 诊断日志（倒数第二条）
-		diagTimer: null
+		diagTimer: null,
+		wordsVer: 0     // 词库版本标记（推送完成时更新，页面据此刷新）
 	},
 	touch: { sx: 0, sy: 0, active: false },
 
@@ -120,6 +124,13 @@ export default {
 					that.diag2 = (n >= 2) ? list[n - 2] : ''
 				}
 			})
+			// 推送完成检测：words_ver 变化 → 重新加载词库（推送期间页面不重启）
+			storage.get('words_ver', 0).then(function (v) {
+				if (v && v !== that.wordsVer) {
+					that.wordsVer = v
+					that.reloadWords()
+				}
+			})
 		}, 600)
 	},
 
@@ -129,16 +140,43 @@ export default {
 
 	reloadWords() {
 		var that = this
-		storage.get('words', []).then(function (list) {
-			that.words = list || []
-			that.totalCount = that.words.length
-			var due = 0
-			for (var i = 0; i < that.words.length; i++) {
-				var w = srs.norm(that.words[i])
-				if (srs.retention(w) < 0.9) due++
-			}
-			that.dueCount = due
-		})
+		// 词库优先从文件读（推送增量写盘，内存友好）；无文件时回退旧 storage 数据
+		try {
+			file.readText({
+				uri: WORDS_URI,
+				success: function (text) {
+					var list = []
+					if (text) {
+						var lines = text.split('\n')
+						for (var i = 0; i < lines.length; i++) {
+							var l = lines[i].trim()
+							if (l) { try { list.push(JSON.parse(l)) } catch (e) { } }
+						}
+					}
+					that.applyWords(list)
+				},
+				fail: function () {
+					storage.get('words', []).then(function (list) {
+						that.applyWords(list || [])
+					})
+				}
+			})
+		} catch (e) {
+			storage.get('words', []).then(function (list) {
+				that.applyWords(list || [])
+			})
+		}
+	},
+
+	applyWords(list) {
+		this.words = list || []
+		this.totalCount = this.words.length
+		var due = 0
+		for (var i = 0; i < this.words.length; i++) {
+			var w = srs.norm(this.words[i])
+			if (srs.retention(w) < 0.9) due++
+		}
+		this.dueCount = due
 	},
 
 	startRound() {
