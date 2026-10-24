@@ -43,8 +43,19 @@ globalThis.conn.on('__hs__', (payload) => {
 })
 
 // 手机推送词表（可靠分块协议：start→逐块确认→done）
-// 推送期间边收边写文件（内存恒定，仿喵喵电子书流式落盘），收齐后合并 SRS 状态再写 storage
+// 推送期间边收边写文件（内存恒定，仿喵喵电子书流式落盘），收齐后合并 SRS 状态写 storage
+// 文件读写统一用 writeArrayBuffer/readArrayBuffer + UTF-16LE（喵喵验证过的链路，
+// writeText 的 append/覆盖行为在本环境不可靠，曾导致词库文件为空）
 const pushState = { expected: 0, recvCount: 0, total: -1 }
+
+// 字符串 → UTF-16LE ArrayBuffer（与喵喵 str2abWrite 一致：JS 字符串本身是 UTF-16）
+function str2abUtf16(str) {
+  var array = new Uint16Array(str.length)
+  for (var i = 0; i < str.length; i++) {
+    array[i] = str.charCodeAt(i)
+  }
+  return array.buffer
+}
 
 // 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
 function appendWordsToFile(words) {
@@ -54,9 +65,9 @@ function appendWordsToFile(words) {
       try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
     }
     try {
-      file.writeText({
+      file.writeArrayBuffer({
         uri: WORDS_URI,
-        text: text,
+        buffer: str2abUtf16(text),
         append: true,
         success: resolve,
         fail: reject
@@ -66,27 +77,35 @@ function appendWordsToFile(words) {
 }
 
 // 推送收齐后：读文件词库 → 与旧库合并（旧词保留手环端已学习的 SRS 状态）→ 写 storage
-// 内存策略：不保留 chunks 对象数组；合并时旧库 parse 一份、新库 parse 一份、结果一份，
-// 比 v0.8（chunks+merged+map+新数组+字符串 5 份驻留）显著下降，最后再 runGC 释放
+// storage 是词库权威（首页优先读 storage）；文件只作推送中间载体，不再回写
 function finalizePush() {
   return new Promise(function (resolve, reject) {
     try {
-      file.readText({
+      file.readArrayBuffer({
         uri: WORDS_URI,
-        success: function (text) {
+        position: 0,
+        length: 16 * 1024 * 1024,
+        success: function (data) {
           try {
+            var text = ''
+            var buf = data && data.buffer
+            if (buf) {
+              for (var i = 0; i < buf.length; i += 2) {
+                text += String.fromCharCode(buf[i + 1] * 256 + buf[i])
+              }
+            }
             var fresh = []
             var lines = text.split('\n')
-            for (var i = 0; i < lines.length; i++) {
-              var l = lines[i].trim()
+            for (var k = 0; k < lines.length; k++) {
+              var l = lines[k].trim()
               if (l) { try { fresh.push(JSON.parse(l)) } catch (e) { } }
             }
             storage.getAll().then(function (obj) {
               try {
                 var map = {}
                 var cur = obj.words || []
-                for (var k = 0; k < cur.length; k++) {
-                  var ow = cur[k]
+                for (var m = 0; m < cur.length; m++) {
+                  var ow = cur[m]
                   if (ow && ow.w) map[ow.w.toLowerCase()] = ow
                 }
                 var merged = []
@@ -105,18 +124,11 @@ function finalizePush() {
                 fresh = null
                 lines = null
                 text = null
+                buf = null
                 map = null
                 try { global.runGC && global.runGC() } catch (e) { }
                 obj.words = merged
                 storage.saveAll(obj).then(function () {
-                  // 合并结果同步覆盖写回文件，保证文件与 storage 一致（首页优先读文件）
-                  var out = ''
-                  for (var m = 0; m < merged.length; m++) {
-                    try { out += JSON.stringify(merged[m]) + '\n' } catch (e) { }
-                  }
-                  try {
-                    file.writeText({ uri: WORDS_URI, text: out, append: false, success: function () { }, fail: function () { } })
-                  } catch (e) { }
                   resolve(merged.length)
                 }).catch(function (e) { reject(e) })
               } catch (e) { reject(e) }
