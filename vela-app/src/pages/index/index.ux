@@ -5,6 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
+				<text class="ver">v0.5</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -387,7 +388,13 @@ export default {
 	font-size: 40px;
 	font-weight: bold;
 	color: #FFFFFF;
-	margin-top: 70px;
+	margin-top: 60px;
+}
+
+.ver {
+	font-size: 18px;
+	color: #3F6FA8;
+	margin-top: 2px;
 }
 
 .title2 {

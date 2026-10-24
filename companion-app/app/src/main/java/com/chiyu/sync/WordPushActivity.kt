@@ -235,7 +235,7 @@ class WordPushActivity : ComponentActivity() {
                     delay(1200)
                 }
                 if (!readyOk) {
-                    throw Exception("手环端未响应：请确认手环上已装新版「池鱼单词」(v0.4) 且保持屏幕点亮/应用在前台")
+                    throw Exception("手环端未响应：请确认手环上「池鱼单词」显示 v0.5 且保持亮屏/在前台")
                 }
 
                 // 2. 逐块确认发送：cur = 下一个要发的块序号
@@ -265,17 +265,18 @@ class WordPushActivity : ComponentActivity() {
                         }
                         append("]}")
                     }
+                    statusText = "正在推送 ${cur + 1}/$total 块，等待手环确认..."
                     conn.sendMessage(payload).await()
                     val g = CompletableDeferred<Int>()
                     gate = g
-                    val next = withTimeoutOrNull(8000) { g.await() }
+                    val next = withTimeoutOrNull(10000) { g.await() }
                     gate = null
                     if (next == null) {
-                        // 超时：可能 BLE 丢块，重发当前块（最多 3 次）
                         retries++
                         if (retries >= 3) {
-                            throw Exception("手环端确认超时，请确认手环应用在前台后重试")
+                            throw Exception("手环端确认超时（块 ${cur + 1}/$total 无回应）：请确认手环上「池鱼单词」显示 v0.5 且保持亮屏，然后重试")
                         }
+                        statusText = "块 ${cur + 1}/$total 无确认，正在重发..."
                         continue
                     }
                     retries = 0
