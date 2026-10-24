@@ -105,6 +105,10 @@ class InterHandshake(context: Context,val scope: CoroutineScope) : Interconn(con
                             super@InterHandshake.sendMessage("{\"tag\":\"$TYPE\",\"count\":0}").await()
                         }
                         promise?.await()
+                        // 关键修复：握手最后一条回包（count=2）与业务消息几乎零间隔连续发送时，
+                        // 小米 BLE 通道会静默丢弃后一条（start 丢失 = 手环端永远等不到推送开始）。
+                        // 握手完成后等 250ms 让通道稳定，再发真正的业务消息。
+                        delay(250)
                     }
                 }
                 complete(super.sendMessage(message).await())
