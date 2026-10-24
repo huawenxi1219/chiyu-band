@@ -215,10 +215,19 @@ class WordPushActivity : ComponentActivity() {
                         gate?.complete(-1)
                     } catch (e: Exception) { }
                 }
+                var readyGate: CompletableDeferred<Unit>? = null
+                conn.addListener("push_ready") { _ ->
+                    readyGate?.complete(Unit)
+                }
 
-                // 1. 通知手环端开始接收（重置接收状态）
+                // 1. 通知手环端开始接收（重置接收状态），等手环端就绪确认
+                val rg = CompletableDeferred<Unit>()
+                readyGate = rg
                 conn.sendMessage("""{"tag":"word_push_start","total":$total}""").await()
-                delay(300) // 给手环端一点处理时间
+                if (withTimeoutOrNull(6000) { rg.await() } == null) {
+                    throw Exception("手环端未响应：请确认手环上已装新版「池鱼单词」(v0.3) 且保持屏幕点亮/应用在前台")
+                }
+                readyGate = null
 
                 // 2. 逐块确认发送：cur = 下一个要发的块序号
                 var cur = 0

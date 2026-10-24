@@ -2,6 +2,7 @@
 // 池鱼单词 - 应用入口：处理与手机的互连（握手 + 词表推送 + 记录回收）
 import Interconn from './common/interconn.js'
 import storage from './common/storage.js'
+import brightness from '@system.brightness'
 
 globalThis.conn = new Interconn()
 
@@ -23,6 +24,8 @@ globalThis.conn.on('word_push_start', (payload) => {
     pushState.chunks = {}
     pushState.expected = 0
     pushState.total = (payload && payload.total) || 0
+    // 强制屏幕常亮：手环应用熄屏/后台时收不到 interconnect 消息，必须保持前台
+    try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
     globalThis.conn.send('push_ready', { ok: true, total: pushState.total })
   } catch (e) { }
 })
@@ -51,6 +54,8 @@ globalThis.conn.on('word_push', (payload) => {
         merged.forEach(x => { if (x && x.w) map[x.w] = x })
         obj.words = Object.keys(map).map(k => map[k])
         storage.saveAll(obj).then(() => {
+          // 推送完成，恢复自动熄屏
+          try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
           globalThis.conn.send('push_done', { count: merged.length, total: obj.words.length })
         })
       })
