@@ -13,25 +13,36 @@ globalThis.conn.on('__hs__', (payload) => {
   }
 })
 
-// 手机推送词表（分块发送：batch=第几块，total=总块数）
-const pendingPush = { chunks: {}, total: -1 }
+// 手机推送词表（可靠分块协议：start→逐块确认→done）
+// 手机端发 word_push_start 通知总数，之后每发一块等手环端 push_next 确认才发下一块，
+// 手环端收齐后落盘并回 push_done —— 与手机端 Interconn 逐块确认逻辑一一对应
+const pushState = { expected: 0, chunks: {}, total: -1 }
+
+globalThis.conn.on('word_push_start', (payload) => {
+  try {
+    pushState.chunks = {}
+    pushState.expected = 0
+    pushState.total = (payload && payload.total) || 0
+    globalThis.conn.send('push_ready', { ok: true, total: pushState.total })
+  } catch (e) { }
+})
 
 globalThis.conn.on('word_push', (payload) => {
   try {
     const batch = (payload && payload.batch) || 0
-    const total = (payload && payload.total) || 1
     const words = (payload && payload.words) || []
-    if (batch === 0) { pendingPush.chunks = {}; pendingPush.total = total }
-    pendingPush.chunks[batch] = words
-    let got = 0
-    for (let i = 0; i < pendingPush.total; i++) {
-      if (pendingPush.chunks[i]) got++
+    // 序号对不上 = 缺块，请求手机端重发当前期望序号
+    if (batch !== pushState.expected) {
+      globalThis.conn.send('push_next', { count: pushState.expected })
+      return
     }
-    if (got >= pendingPush.total) {
+    pushState.chunks[batch] = words
+    pushState.expected++
+    if (pushState.expected >= pushState.total) {
       // 收齐所有分块，合并进本地词库（手机为准，按单词覆盖）
       let merged = []
-      for (let i = 0; i < pendingPush.total; i++) {
-        merged = merged.concat(pendingPush.chunks[i] || [])
+      for (let i = 0; i < pushState.total; i++) {
+        merged = merged.concat(pushState.chunks[i] || [])
       }
       storage.getAll().then(obj => {
         const map = {}
@@ -40,10 +51,14 @@ globalThis.conn.on('word_push', (payload) => {
         merged.forEach(x => { if (x && x.w) map[x.w] = x })
         obj.words = Object.keys(map).map(k => map[k])
         storage.saveAll(obj).then(() => {
-          globalThis.conn.send('push_ack', { count: merged.length, total: obj.words.length })
+          globalThis.conn.send('push_done', { count: merged.length, total: obj.words.length })
         })
       })
-      pendingPush.chunks = {}
+      pushState.chunks = {}
+      pushState.total = -1
+    } else {
+      // 确认已收到本块，请求下一块
+      globalThis.conn.send('push_next', { count: pushState.expected })
     }
   } catch (e) { }
 })

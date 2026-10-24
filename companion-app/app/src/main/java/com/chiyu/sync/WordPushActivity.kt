@@ -24,10 +24,12 @@ import com.chiyu.sync.logic.InterHandshake
 import com.chiyu.sync.ui.compoments.EbookScaffold
 import com.chiyu.sync.ui.compoments.NormalButton
 import com.chiyu.sync.ui.theme.EbookTheme
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
@@ -195,20 +197,39 @@ class WordPushActivity : ComponentActivity() {
                 val chunkSize = 20
                 val total = (words.size + chunkSize - 1) / chunkSize
                 var acked = false
+                var ackedCount = 0
 
-                // 注册确认监听
-                conn.addListener("push_ack") { _ ->
-                    acked = true
+                // 可靠协议：逐块确认（与手环端 app.ux 的 push_next/push_done 一一对应）
+                // 发一块 → 等手环端确认 → 才发下一块；手环端缺块会回当前期望序号，手机端据此重发
+                var gate: CompletableDeferred<Int>? = null
+                conn.addListener("push_next") { payload ->
+                    try {
+                        val count = json.decodeFromString<AckPayload>(payload).count
+                        gate?.complete(count)
+                    } catch (e: Exception) { }
+                }
+                conn.addListener("push_done") { payload ->
+                    try {
+                        val count = json.decodeFromString<AckPayload>(payload).count
+                        ackedCount = count
+                        gate?.complete(-1)
+                    } catch (e: Exception) { }
                 }
 
-                for (batch in 0 until total) {
+                // 1. 通知手环端开始接收（重置接收状态）
+                conn.sendMessage("""{"tag":"word_push_start","total":$total}""").await()
+                delay(300) // 给手环端一点处理时间
+
+                // 2. 逐块确认发送：cur = 下一个要发的块序号
+                var cur = 0
+                var retries = 0
+                while (cur < total && !acked) {
                     val sub = words.subList(
-                        batch * chunkSize,
-                        min((batch + 1) * chunkSize, words.size)
+                        cur * chunkSize,
+                        min((cur + 1) * chunkSize, words.size)
                     )
                     val payload = buildString {
-                        append("{\"tag\":\"word_push\",\"batch\":").append(batch)
-                        append(",\"total\":").append(total)
+                        append("{\"tag\":\"word_push\",\"batch\":").append(cur)
                         append(",\"words\":[")
                         sub.forEachIndexed { i, w ->
                             if (i > 0) append(",")
@@ -227,15 +248,26 @@ class WordPushActivity : ComponentActivity() {
                         append("]}")
                     }
                     conn.sendMessage(payload).await()
-                    progress = (batch + 1).toDouble() / total
-                    statusText = "正在推送 ${batch + 1}/$total 块"
-                    delay(60) // 让手环处理，避免 BLE 消息堆积
-                }
-                // 等待确认（最多 3 秒）
-                var waited = 0
-                while (!acked && waited < 30) {
-                    delay(100)
-                    waited++
+                    val g = CompletableDeferred<Int>()
+                    gate = g
+                    val next = withTimeoutOrNull(8000) { g.await() }
+                    gate = null
+                    if (next == null) {
+                        // 超时：可能 BLE 丢块，重发当前块（最多 3 次）
+                        retries++
+                        if (retries >= 3) {
+                            throw Exception("手环端确认超时，请确认手环应用在前台后重试")
+                        }
+                        continue
+                    }
+                    retries = 0
+                    if (next == -1) {
+                        acked = true
+                        break
+                    }
+                    cur = next
+                    progress = cur.toDouble() / total
+                    statusText = "正在推送 ${min(cur, total)}/$total 块"
                 }
                 done = true
                 // 一键模式（从池鱼Study拉词）推送完毕 → 回执标记"已同步"，
