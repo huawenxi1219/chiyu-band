@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.7</text>
+				<text class="ver">v0.8</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -106,10 +106,18 @@ export default {
 		// 诊断日志轮询：每 600ms 从共享存储读最近 2 条收发记录（多行分别显示，避免 \n 渲染异常）
 		this.diagTimer = setInterval(function () {
 			storage.get('diag', []).then(function (arr) {
-				if (arr && arr.length) {
-					var n = arr.length
-					that.diag1 = arr[n - 1]
-					that.diag2 = (n >= 2) ? arr[n - 2] : ''
+				var list = (arr && arr.length) ? arr : (globalThis.__diag || [])
+				if (list && list.length) {
+					var n = list.length
+					that.diag1 = list[n - 1]
+					that.diag2 = (n >= 2) ? list[n - 2] : ''
+				}
+			}).catch(function () {
+				var list = globalThis.__diag || []
+				if (list.length) {
+					var n = list.length
+					that.diag1 = list[n - 1]
+					that.diag2 = (n >= 2) ? list[n - 2] : ''
 				}
 			})
 		}, 600)

@@ -8,7 +8,14 @@ export default class Interconn {
     this.conn = interconnect.instance();
     this.conn.onmessage = ({ data }) => {
       let msg = null;
-      try { msg = JSON.parse(data) } catch (e) { return }
+      try { msg = JSON.parse(data) } catch (e) {
+        // 收到无法解析的消息：记录诊断（不静默丢弃），下次问题可查
+        try {
+          var p = (data && data.length) ? data.length : 0
+          globalThis.diag && globalThis.diag('parse', 'FAIL len=' + p)
+        } catch (e2) { }
+        return
+      }
       const { tag, ...payload } = msg;
       if (this.callbacks[tag]) this.callbacks[tag](payload);
     };

@@ -194,8 +194,53 @@ class WordPushActivity : ComponentActivity() {
                     return@LaunchedEffect
                 }
                 statusText = "连接成功，开始推送..."
-                val chunkSize = 20
-                val total = (words.size + chunkSize - 1) / chunkSize
+                // 动态字节分块：小米 interconnect 单条消息有大小限制（约 1-2KB），
+                // 实测小消息(start/hs/确认)全通、20词大块被静默丢弃——
+                // 按 UTF-8 字节 ≤1536 分块，每块约 8-10 词
+                val MAX_CHUNK_BYTES = 1536
+                // JSON 字符串值完整转义：仅转义反斜杠/引号会漏掉换行符 \n 等，
+                // 导致整块 JSON 非法被手环端静默丢弃（实测 147 词的释义含换行）
+                fun jsonEsc(s: String): String = buildString {
+                    for (ch in s) {
+                        when {
+                            ch == '\\' -> append("\\\\")
+                            ch == '"' -> append("\\\"")
+                            ch == '\n' -> append("\\n")
+                            ch == '\r' -> append("\\r")
+                            ch == '\t' -> append("\\t")
+                            ch == '\b' -> append("\\b")
+                            ch == '\u000C' -> append("\\f")
+                            ch.code < 0x20 -> append("\\u%04x".format(ch.code))
+                            else -> append(ch)
+                        }
+                    }
+                }
+                fun wordJson(w: HttpBridge.WordItem): String = buildString {
+                    append("{\"w\":\"").append(jsonEsc(w.w))
+                    append("\",\"m\":\"").append(jsonEsc(w.m))
+                    append("\",\"e\":").append(if (w.e.isFinite()) w.e.toString() else "2.5")
+                    append(",\"i\":").append(w.i)
+                    append(",\"lvl\":").append(w.lvl)
+                    append(",\"c\":").append(w.c)
+                    append(",\"wc\":").append(w.wc)
+                    append(",\"next\":").append(w.next)
+                    append("}")
+                }
+                val chunks = mutableListOf<List<HttpBridge.WordItem>>()
+                var curBatch = mutableListOf<HttpBridge.WordItem>()
+                var curSize = 0
+                for (w in words) {
+                    val wb = wordJson(w).toByteArray().size
+                    if (curBatch.isNotEmpty() && curSize + wb > MAX_CHUNK_BYTES) {
+                        chunks.add(curBatch)
+                        curBatch = mutableListOf()
+                        curSize = 0
+                    }
+                    curBatch.add(w)
+                    curSize += wb
+                }
+                if (curBatch.isNotEmpty()) chunks.add(curBatch)
+                val total = chunks.size
                 var acked = false
                 var ackedCount = 0
 
@@ -235,33 +280,20 @@ class WordPushActivity : ComponentActivity() {
                     delay(1200)
                 }
                 if (!readyOk) {
-                    throw Exception("手环端未响应：请确认手环上「池鱼单词」显示 v0.5 且保持亮屏/在前台")
+                    throw Exception("手环端未响应：请确认手环上「池鱼单词」显示 v0.8 且保持亮屏/在前台")
                 }
 
                 // 2. 逐块确认发送：cur = 下一个要发的块序号
                 var cur = 0
                 var retries = 0
                 while (cur < total && !acked) {
-                    val sub = words.subList(
-                        cur * chunkSize,
-                        min((cur + 1) * chunkSize, words.size)
-                    )
+                    val sub = chunks[cur]
                     val payload = buildString {
                         append("{\"tag\":\"word_push\",\"batch\":").append(cur)
                         append(",\"words\":[")
                         sub.forEachIndexed { i, w ->
                             if (i > 0) append(",")
-                            append("{\"w\":\"")
-                            append(w.w.replace("\\", "\\\\").replace("\"", "\\\""))
-                            append("\",\"m\":\"")
-                            append(w.m.replace("\\", "\\\\").replace("\"", "\\\""))
-                            append("\",\"e\":").append(w.e)
-                            append(",\"i\":").append(w.i)
-                            append(",\"lvl\":").append(w.lvl)
-                            append(",\"c\":").append(w.c)
-                            append(",\"wc\":").append(w.wc)
-                            append(",\"next\":").append(w.next)
-                            append("}")
+                            append(wordJson(w))
                         }
                         append("]}")
                     }
@@ -274,7 +306,7 @@ class WordPushActivity : ComponentActivity() {
                     if (next == null) {
                         retries++
                         if (retries >= 3) {
-                            throw Exception("手环端确认超时（块 ${cur + 1}/$total 无回应）：请确认手环上「池鱼单词」显示 v0.5 且保持亮屏，然后重试")
+                            throw Exception("手环端确认超时（块 ${cur + 1}/$total 无回应）：请确认手环上「池鱼单词」显示 v0.8 且保持亮屏，然后重试")
                         }
                         statusText = "块 ${cur + 1}/$total 无确认，正在重发..."
                         continue

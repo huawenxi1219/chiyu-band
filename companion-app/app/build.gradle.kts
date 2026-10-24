@@ -16,8 +16,8 @@ android {
         applicationId = "com.chiyu.sync"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.1.10"
+        versionCode = 11
+        versionName = "0.1.11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

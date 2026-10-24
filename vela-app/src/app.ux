@@ -15,7 +15,9 @@ globalThis.diag = function (tag, msg) {
     var ts = (h < 10 ? '0' + h : h) + ':' + (m < 10 ? '0' + m : m) + ':' + (s < 10 ? '0' + s : s)
     globalThis.__diag.push(ts + ' ' + tag + (msg ? ' ' + msg : ''))
     if (globalThis.__diag.length > 24) globalThis.__diag.shift()
-    storage.set('diag', globalThis.__diag)
+    try {
+      storage.set('diag', globalThis.__diag)
+    } catch (e2) { }
   } catch (e) { }
 }
 globalThis.diag('app', 'started')
@@ -55,6 +57,11 @@ globalThis.conn.on('word_push_start', (payload) => {
 })
 
 globalThis.conn.on('word_push', (payload) => {
+  // 收到块消息的瞬间立即打点（即使后续处理异常也有记录）
+  try {
+    var pb = (payload && payload.batch) || -9
+    globalThis.diag('push', 'RAW batch=' + pb)
+  } catch (e) { }
   try {
     const batch = (payload && payload.batch) || 0
     const words = (payload && payload.words) || []
