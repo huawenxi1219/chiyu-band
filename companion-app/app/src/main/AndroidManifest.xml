@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Android 12+ 包可见性限制：必须声明才能绑定小米运动健康服务（SDK 依赖），
+         否则 connectedNodes 永远查不到手环。AAR 内的 <queries> 不会自动合并。 -->
+    <queries>
+        <package android:name="com.xiaomi.wearable" />
+        <package android:name="com.mi.health" />
+    </queries>
+
     <application
             android:allowBackup="true"
             android:dataExtractionRules="@xml/data_extraction_rules"

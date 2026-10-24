@@ -28,17 +28,27 @@ open class Interconn(context: Context){
         onMessage[msg.tag]?.invoke(message)
     }
     fun connect(): CompletableDeferred<String> {
-        return CompletableDeferred<String>().apply {
-            nodeApi.connectedNodes.addOnSuccessListener {
-                if (it.isEmpty()){
-                    completeExceptionally(Exception("未找到设备！"))
-                    return@addOnSuccessListener
+        val deferred = CompletableDeferred<String>()
+        // 节点发现有时有延迟（手环端应用刚打开/小米运动健康刚同步），自动重试 3 次
+        retryQuery(deferred, 3)
+        return deferred
+    }
+    private fun retryQuery(deferred: CompletableDeferred<String>, attempt: Int) {
+        nodeApi.connectedNodes.addOnSuccessListener {
+            if (it.isEmpty()) {
+                if (attempt > 1) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        retryQuery(deferred, attempt - 1)
+                    }, 2000)
+                } else {
+                    deferred.completeExceptionally(Exception("未找到设备！请确认：①手环上已打开「池鱼单词」 ②小米运动健康已连接并同步过手环"))
                 }
-                currentNode = it[0]
-                complete(currentNode!!.name)
-            }.addOnFailureListener {
-                completeExceptionally(Exception("获取设备列表失败，请检查小米运动健康是否已连接！"))
+                return@addOnSuccessListener
             }
+            currentNode = it[0]
+            deferred.complete(currentNode!!.name)
+        }.addOnFailureListener {
+            deferred.completeExceptionally(Exception("获取设备列表失败：${it.message ?: "未知错误"}（请确认小米运动健康已在后台运行）"))
         }
     }
     fun auth():CompletableDeferred<Unit>{
