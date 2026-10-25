@@ -194,10 +194,12 @@ class WordPushActivity : ComponentActivity() {
                     return@LaunchedEffect
                 }
                 statusText = "连接成功，开始推送..."
-                // 动态字节分块：小米 interconnect 单条消息有大小限制（约 1-2KB），
-                // 实测小消息(start/hs/确认)全通、20词大块被静默丢弃——
-                // 按 UTF-8 字节 ≤1536 分块，每块约 8-10 词
-                val MAX_CHUNK_BYTES = 1536
+                // 动态字节分块：早期曾误判"20词大块被静默丢弃"，实测根因是 JSON 转义不全
+                // （147 词的释义含 \n 导致整块 parse 失败被手环静默丢弃），v0.1.11 已修复完整转义。
+                // 手环端 writeArrayBuffer 追加写文件：块数越少越稳（喵喵电子书 20KB 大块已验证）。
+                // 按 UTF-8 字节 ≤16KB 分块：3503 词约 20 块，手环端仅 append ~20 次，
+                // 规避 Vela 文件 API 在"小碎块高频追加"场景偶发不回调导致推送卡死
+                val MAX_CHUNK_BYTES = 16 * 1024
                 // JSON 字符串值完整转义：仅转义反斜杠/引号会漏掉换行符 \n 等，
                 // 导致整块 JSON 非法被手环端静默丢弃（实测 147 词的释义含换行）
                 fun jsonEsc(s: String): String = buildString {

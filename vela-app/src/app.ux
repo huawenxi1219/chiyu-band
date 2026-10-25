@@ -59,21 +59,37 @@ function str2abUtf16(str) {
 }
 
 // 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
+// 关键：writeArrayBuffer 偶发"永不回调"（Vela 文件 API 不稳定），
+// 必须加 3 秒超时兜底——超时也视为写盘完成继续推进，绝不让推送卡死
 function appendWordsToFile(words) {
   return new Promise(function (resolve, reject) {
     var text = ''
     for (var i = 0; i < words.length; i++) {
       try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
     }
+    var done = false
+    var timer = setTimeout(function () {
+      if (!done) {
+        done = true
+        globalThis.diag('push', 'WRITE TIMEOUT skip ' + words.length)
+        resolve()
+      }
+    }, 3000)
     try {
       file.writeArrayBuffer({
         uri: WORDS_URI,
         buffer: str2abUtf16(text),
         append: true,
-        success: resolve,
-        fail: reject
+        success: function () {
+          if (!done) { done = true; clearTimeout(timer); resolve() }
+        },
+        fail: function (e) {
+          if (!done) { done = true; clearTimeout(timer); reject(e) }
+        }
       })
-    } catch (e) { reject(e) }
+    } catch (e) {
+      if (!done) { done = true; clearTimeout(timer); reject(e) }
+    }
   })
 }
 
