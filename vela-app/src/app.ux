@@ -14,12 +14,11 @@ globalThis.conn = new Interconn()
 const MAX_BLOCKS = 32
 function blockUri(b) { return 'internal://files/chiyu_block_' + b + '.jsonl' }
 
-// 接收开始：清掉旧词库（旧分块文件 + 历史单文件词库，忽略删除失败）
+// 接收开始：清掉旧单文件词库 + 重置计数。
+// 注意：不逐块循环删除旧块文件（32 次 file.delete 会占大量时间拖慢推送），
+// 每块由 writeBlockToFile 写前单独 delete，天然幂等。
 function clearOldWords() {
   try { file.delete({ uri: 'internal://files/chiyu_words.jsonl', success: function () { }, fail: function () { } }) } catch (e) { }
-  for (var b = 0; b < MAX_BLOCKS; b++) {
-    try { file.delete({ uri: blockUri(b), success: function () { }, fail: function () { } }) } catch (e) { }
-  }
   try { storage.set('total_words', 0) } catch (e) { }
 }
 
