@@ -1,8 +1,8 @@
 {
   "package": "com.chiyu.sync",
   "name": "池鱼单词",
-  "versionName": "0.16",
-  "versionCode": 16,
+  "versionName": "0.18",
+  "versionCode": 18,
   "minPlatformVersion": 1100,
   "icon": "/common/logo.png",
   "simulationVersion": "default",

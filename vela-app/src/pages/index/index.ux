@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.16</text>
+				<text class="ver">v0.18</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -127,7 +127,8 @@ export default {
 		storage.get('records', []).then(function (recs) {
 			that.gapHours = srs.estimateGapHours(recs)
 		})
-		// 诊断日志轮询：每 600ms 从共享存储读最近 2 条收发记录（多行分别显示，避免 \n 渲染异常）
+		// 诊断日志轮询：每 3 秒读一次（600ms 太频繁，Vela storage 读写有延迟且耗电，
+		// 高频轮询会拖慢主线程、加剧死机感；接收日志已截断为 24 条）
 		this.diagTimer = setInterval(function () {
 			storage.get('diag', []).then(function (arr) {
 				var list = (arr && arr.length) ? arr : (globalThis.__diag || [])
@@ -151,7 +152,7 @@ export default {
 					that.reloadWords()
 				}
 			})
-		}, 600)
+		}, 3000)
 	},
 
 	onHide() {
@@ -162,12 +163,15 @@ export default {
 		var that = this
 		// 接收中（手机推送进行时）不加载：推送期间零词库占用，
 		// 避免应用被手机 openApp 拉起时一启动就解析词库导致 OOM 重启
-		// 僵尸兜底：若 receiving 标记残留超过 30 秒（推送中断崩溃所致），
-		// 自动清掉并照常加载，防止"永远 0 词"
+		// 僵尸兜底：仅当 receiving 标记残留超过 5 分钟才视为推送中断（崩溃残留）
+		// 自动清掉并照常加载。绝不能误清活跃推送——3503 词全程推送约 40-60 秒，
+		// 若按 30 秒误判中断会清掉标记，首页抢跑解析半截文件，与接收写盘并行 OOM 重启
 		storage.get('receiving', 0).then(function (recv) {
 			if (recv <= 0) { that.doReload(); return }
+			// 活跃接收中：明确显示状态，不加载词库
+			that.debug = '正在接收词库...'
 			storage.get('receivingAt', 0).then(function (at) {
-				if (at > 0 && Date.now() - at > 30000) {
+				if (at > 0 && Date.now() - at > 300000) {
 					storage.set('receiving', 0)
 					storage.set('receivingAt', 0)
 					that.doReload()
@@ -237,26 +241,37 @@ export default {
 			that.finishIndex(idx)
 		}
 		function readNext() {
-			// 每段读前检查接收中标记：推送进行时立即中止，绝不与写盘并行解析
-			storage.get('receiving', 0).then(function (recv) {
-				if (recv > 0) { that._indexing = false; that.applyWords([]); return }
-				try {
-					file.readArrayBuffer({
-						uri: WORDS_URI,
-						position: pos,
-						length: READ_STEP,
-						success: function (data) {
-							var buf = data && data.buffer
-							if (!buf || !buf.length) { finishLight(); return }
-							parseText(decode16(buf))
-							pos += buf.length          // 按实际读到的字节推进
-							readNext()                 // 文件回调天然让出事件循环
-						},
-						fail: function () { finishLight() }
-					})
-				} catch (e) { finishLight() }
-			})
+			// 每 4 段检查一次接收中标记（storage.get 有延迟，逐段查太慢）：
+			// 推送进行时立即中止，绝不与写盘并行解析（最多多解析 4 段就被拦下）
+			if (checkCount % 4 === 0) {
+				checkCount++
+				storage.get('receiving', 0).then(function (recv) {
+					if (recv > 0) { that._indexing = false; that.applyWords([]); return }
+					readSegment()
+				})
+			} else {
+				checkCount++
+				readSegment()
+			}
 		}
+		function readSegment() {
+			try {
+				file.readArrayBuffer({
+					uri: WORDS_URI,
+					position: pos,
+					length: READ_STEP,
+					success: function (data) {
+						var buf = data && data.buffer
+						if (!buf || !buf.length) { finishLight(); return }
+						parseText(decode16(buf))
+						pos += buf.length          // 按实际读到的字节推进
+						readNext()                 // 文件回调天然让出事件循环
+					},
+					fail: function () { finishLight() }
+				})
+			} catch (e) { finishLight() }
+		}
+		var checkCount = 0
 		readNext()
 	},
 
@@ -293,6 +308,10 @@ export default {
 	},
 
 	startRound() {
+		if (this._indexing) {
+			this.debug = '词库加载中，请稍候'
+			return
+		}
 		if (!this.index || !this.index.length) {
 			this.debug = '词库为空，请先用手机同步'
 			return
