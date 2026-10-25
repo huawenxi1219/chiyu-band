@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.12</text>
+				<text class="ver">v0.13</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -26,7 +26,7 @@
 			<div class="miniExit" @click="exitApp"><text class="miniExitText">退</text></div>
 			<div class="prog"><div class="progFill" style="width: {{progPct}}%"></div></div>
 			<text class="word">{{curWord.w}}</text>
-			<text class="pos">{{roundDone}}/{{totalCount}} · 词库共 {{totalCount}}</text>
+			<text class="pos">第{{roundNo}}批 {{roundDone}}/{{batchSize}}</text>
 			<text class="hint">←认识  ↑模糊  ↓不会  →退出</text>
 		</div>
 
@@ -39,14 +39,12 @@
 			<text class="hint2">轻点继续 · 右滑退出</text>
 		</div>
 
-		<!-- 本轮完成 -->
+		<!-- 今日全部学完 -->
 		<div if="{{mode === 'done'}}" class="card animIn">
-			<text class="title2">本轮完成</text>
+			<text class="title2">今日完成</text>
 			<text class="stat">认识 {{statK}} · 模糊 {{statF}} · 不会 {{statN}}</text>
 			<text if="{{retryCount > 0}}" class="stat2">其中 {{retryCount}} 词复考巩固</text>
-			<div class="btn" @click="startRound">
-				<text class="btnText">再来一轮</text>
-			</div>
+			<text class="stat2">全部 {{totalCount}} 词已按计划复习</text>
 			<div class="btnExit" @click="exitApp">
 				<text class="btnExitText">退出</text>
 			</div>
@@ -64,12 +62,17 @@ import app from '@system.app'
 import router from '@system.router'
 
 const WORDS_URI = 'internal://files/chiyu_words.jsonl'
+const BATCH_SIZE = 30      // 每批学习词数（手环内存小，分批加载防 OOM 重启）
+const READ_STEP = 64 * 1024  // 文件分段读取字节数（UTF-16LE，需为偶数）
 
 export default {
 	private: {
 		mode: 'home',        // home | study | meaning | done
-		words: [],
-		answered: {},        // 本轮已答过的词（全库动态选词防重复）
+		index: [],           // 轻量索引：全库词仅存 SRS 字段+行号（不存释义，内存可控）
+		words: [],           // 当前批次完整词对象（≤BATCH_SIZE 个）
+		roundNo: 0,          // 当前批次序号（第几批）
+		batchSize: 0,        // 当前批次词数
+		answered: {},        // 本批已答过的词（防重复）
 		idx: 0,
 		curWord: { w: '', m: '' },
 		dueCount: 0,
@@ -84,12 +87,12 @@ export default {
 		gapHours: 24,      // 用户使用频率（小时），打开时估算，决定基础复习间隔
 		animClass: 'animIn', // 卡片动画：animIn | flyL | flyU | flyD
 		choosing: false,     // 防连点：滑动选词动画期间的输入锁
-		roundDone: 0,      // 本轮已答题数（含复考）
-		progPct: 0,        // 本轮进度 %
-		retryQueue: [],    // 轮内复考队列（选"不会/模糊"的词）
-		retryCounts: {},   // 词 → 本轮已复考次数（上限 2 次，防循环）
+		roundDone: 0,      // 本批已答题数（含复考）
+		progPct: 0,        // 本批进度 %
+		retryQueue: [],    // 批内复考队列（选"不会/模糊"的词）
+		retryCounts: {},   // 词 → 本批已复考次数（上限 2 次，防循环）
 		sinceRetry: 0,     // 距上次复考已走了几步（每 2 步插一次复考）
-		retryCount: 0,     // 本轮实际复考次数
+		retryCount: 0,     // 本批实际复考次数
 		debug: '',
 		diag1: '',      // 诊断日志（最近一条，推送排障时显示）
 		diag2: '',      // 诊断日志（倒数第二条）
@@ -140,35 +143,21 @@ export default {
 
 	reloadWords() {
 		var that = this
-		// 接收中（手机推送进行时）不加载词库：推送期间零词库占用，
-		// 避免应用被手机 openApp 拉起时一启动就全量解析 3503 词导致 OOM 重启
+		// 接收中（手机推送进行时）不加载：推送期间零词库占用，
+		// 避免应用被手机 openApp 拉起时一启动就解析词库导致 OOM 重启
 		storage.get('receiving', 0).then(function (recv) {
 			if (recv > 0) return
-			// 词库从文件读（手机推送写盘的权威词库）；学习进度（SRS 状态）独立存 storage 'srsmap'
 			try {
-				file.readArrayBuffer({
+				file.access({
 					uri: WORDS_URI,
-					position: 0,
-					length: 16 * 1024 * 1024,
-					success: function (data) {
-						var text = ''
-						var buf = data && data.buffer
-						if (buf) {
-							for (var i = 0; i < buf.length; i += 2) {
-								text += String.fromCharCode(buf[i + 1] * 256 + buf[i])
-							}
-						}
-						var list = []
-						var lines = text.split('\n')
-						for (var k = 0; k < lines.length; k++) {
-							var l = lines[k].trim()
-							if (l) { try { list.push(JSON.parse(l)) } catch (e) { } }
-						}
-						that.applyWords(list)
+					success: function () {
+						file.get({
+							uri: WORDS_URI,
+							success: function (d) { that.buildIndex((d && d.length) || 0) },
+							fail: function () { that.applyWords([]) }
+						})
 					},
-					fail: function () {
-						that.applyWords([])
-					}
+					fail: function () { that.applyWords([]) }
 				})
 			} catch (e) {
 				that.applyWords([])
@@ -176,59 +165,212 @@ export default {
 		})
 	},
 
-	applyWords(list) {
+	// 构建轻量索引：分段读词库文件，只保留 SRS 字段+行号（丢弃释义大字符串），
+	// 内存只驻留轻量小对象（对比全量词库小 5-8 倍），学习时按批取完整内容
+	buildIndex(fileSize) {
 		var that = this
-		// 合并学习进度：srsmap 里有的词，用手环端已学习的 SRS 状态覆盖手机端初始值
+		var idx = []
+		var lineNo = 0
+		var pos = 0
+		var remain = ''
+		function readNext() {
+			if (pos >= fileSize) {
+				if (remain) {
+					try {
+						var o = JSON.parse(remain.trim())
+						idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
+					} catch (e) { }
+				}
+				that.finishIndex(idx)
+				return
+			}
+			var len = Math.min(READ_STEP, fileSize - pos)
+			file.readArrayBuffer({
+				uri: WORDS_URI,
+				position: pos,
+				length: len,
+				success: function (data) {
+					var buf = data && data.buffer
+					var text = ''
+					if (buf) {
+						for (var i = 0; i < buf.length; i += 2) {
+							text += String.fromCharCode(buf[i + 1] * 256 + buf[i])
+						}
+					}
+					text = remain + text
+					var parts = text.split('\n')
+					remain = parts.pop()   // 段尾残留可能是不完整行，留到下一段拼接
+					for (var k = 0; k < parts.length; k++) {
+						var l = parts[k].trim()
+						if (l) {
+							try {
+								var o = JSON.parse(l)
+								idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
+							} catch (e) { }
+							lineNo++
+						}
+					}
+					pos += buf.length
+					readNext()
+				},
+				fail: function () { that.finishIndex(idx) }
+			})
+		}
+		readNext()
+	},
+
+	finishIndex(idx) {
+		var that = this
+		// 合并学习进度：srsmap 里有的词，用手环端已学习的 SRS 状态覆盖初始值
 		storage.get('srsmap', {}).then(function (map) {
-			for (var i = 0; i < list.length; i++) {
-				var w = list[i]
-				var s = map[(w.w || '').toLowerCase()]
+			for (var i = 0; i < idx.length; i++) {
+				var s = map[(idx[i].w || '').toLowerCase()]
 				if (s) {
-					w.e = s.e; w.i = s.i; w.lvl = s.lvl
-					w.c = s.c; w.wc = s.wc; w.next = s.next
+					idx[i].e = s.e; idx[i].i = s.i; idx[i].lvl = s.lvl
+					idx[i].c = s.c; idx[i].wc = s.wc; idx[i].next = s.next
 				}
 			}
-			that.words = list || []
-			that.totalCount = that.words.length
+			that.index = idx || []
+			that.totalCount = that.index.length
 			var due = 0
-			for (var j = 0; j < that.words.length; j++) {
-				var w2 = srs.norm(that.words[j])
+			for (var j = 0; j < that.index.length; j++) {
+				var w2 = srs.norm(that.index[j])
 				if (srs.retention(w2) < 0.9) due++
 			}
 			that.dueCount = due
+			that.debug = ''
 		})
 	},
 
+	applyWords(list) {
+		this.index = list || []
+		this.totalCount = this.index.length
+		this.dueCount = 0
+		this.debug = ''
+	},
+
 	startRound() {
-		if (!this.words.length) {
+		if (!this.index || !this.index.length) {
 			this.debug = '词库为空，请先用手机同步'
 			return
 		}
-		// 全库动态选词：每个词独立计算紧迫度，先学最该学的
-		this.answered = {}
-		this.idx = 0
 		this.statK = 0
 		this.statF = 0
 		this.statN = 0
 		this.pendingRec = null
-		this.roundDone = 0
-		this.progPct = 0
-		this.retryQueue = []
-		this.retryCounts = {}
-		this.sinceRetry = 0
 		this.retryCount = 0
-		this.choosing = false
-		this.animClass = 'animIn'
-		var first = srs.pickNextAll(this.words, this.answered)
-		if (!first) {
-			this.debug = '词库为空，请先用手机同步'
+		this.debug = ''
+		this.loadNextBatch()
+	},
+
+	// 从轻量索引选出最紧急的一批（SRS 紧迫度排序取前 BATCH_SIZE），再读完整内容
+	loadNextBatch() {
+		var that = this
+		var tmp = []
+		for (var i = 0; i < this.index.length; i++) {
+			var w = srs.norm(this.index[i])
+			if (srs.retention(w) < 0.9) {
+				tmp.push({ ret: srs.retention(w), lineNo: this.index[i].lineNo })
+			}
+		}
+		tmp.sort(function (a, b) { return a.ret - b.ret })
+		if (!tmp.length) {
+			// 全部按计划复习完毕
+			this.mode = 'done'
+			this.idx = 0
+			this.words = []
+			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
 			return
 		}
-		this.curWord = first
-		this.studyStart = Date.now()
-		this.mode = 'study'
-		this.debug = ''
-		try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+		var want = {}
+		var n = Math.min(BATCH_SIZE, tmp.length)
+		for (var k = 0; k < n; k++) want[tmp[k].lineNo] = true
+		tmp = null
+		try { global.runGC && global.runGC() } catch (e) { }
+		// 分段读文件取这批词的完整内容（含释义）
+		try {
+			file.get({
+				uri: WORDS_URI,
+				success: function (d) {
+					that.readBatchFromFile((d && d.length) || 0, want, function (words) {
+						if (!words.length) {
+							that.mode = 'done'
+							return
+						}
+						that.words = words
+						that.batchSize = words.length
+						that.roundNo++
+						that.idx = 0
+						that.answered = {}
+						that.retryQueue = []
+						that.retryCounts = {}
+						that.sinceRetry = 0
+						that.roundDone = 0
+						that.choosing = false
+						that.animClass = 'animIn'
+						that.curWord = words[0]
+						that.studyStart = Date.now()
+						that.mode = 'study'
+						that.debug = ''
+						try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+					})
+				},
+				fail: function () { that.mode = 'done' }
+			})
+		} catch (e) {
+			this.mode = 'done'
+		}
+	},
+
+	// 分段读文件，按行号匹配取本批词的完整对象（附加 _ln 行号供索引回写）
+	readBatchFromFile(fileSize, want, cb) {
+		var out = []
+		var lineNo = 0
+		var pos = 0
+		var remain = ''
+		function readNext() {
+			if (pos >= fileSize) {
+				if (remain) {
+					try {
+						var o = JSON.parse(remain.trim())
+						if (want[lineNo]) { o._ln = lineNo; out.push(o) }
+					} catch (e) { }
+				}
+				cb(out)
+				return
+			}
+			var len = Math.min(READ_STEP, fileSize - pos)
+			file.readArrayBuffer({
+				uri: WORDS_URI,
+				position: pos,
+				length: len,
+				success: function (data) {
+					var buf = data && data.buffer
+					var text = ''
+					if (buf) {
+						for (var i = 0; i < buf.length; i += 2) {
+							text += String.fromCharCode(buf[i + 1] * 256 + buf[i])
+						}
+					}
+					text = remain + text
+					var parts = text.split('\n')
+					remain = parts.pop()
+					for (var k = 0; k < parts.length; k++) {
+						var l = parts[k].trim()
+						if (l) {
+							if (want[lineNo]) {
+								try { var o = JSON.parse(l); o._ln = lineNo; out.push(o) } catch (e) { }
+							}
+							lineNo++
+						}
+					}
+					pos += buf.length
+					readNext()
+				},
+				fail: function () { cb(out) }
+			})
+		}
+		readNext()
 	},
 
 	onTouchStart(e) {
@@ -304,7 +446,7 @@ export default {
 		else this.statN++
 		this.lastActText = action === 'know' ? '认识 ✓' : (action === 'fuzzy' ? '模糊 ~' : '不会 ✗')
 		this.roundDone++
-		this.progPct = Math.min(100, Math.round(this.roundDone / this.totalCount * 100))
+		this.progPct = Math.min(100, Math.round(this.roundDone / this.batchSize * 100))
 		// 轮内复考：选"不会/模糊"的词进队列，每走 2 步插回来再考一次（同词最多复考 2 次）
 		if (action !== 'know') {
 			var key = (this.curWord.w || '').toLowerCase()
@@ -369,21 +511,45 @@ export default {
 			return
 		}
 		this.debug = ''
-		// 全库动态选词：排除已答，从整个词库挑当下最紧急的一个
-		// 每个词独立计算（遗忘曲线+熟练度+错次+刚更新的状态），轻微随机防同序
-		var next = srs.pickNextAll(this.words, this.answered)
-		if (next) {
-			this.idx++
-			this.curWord = next
+		// 批内顺序推进（本批已是全库最紧急的一批）
+		this.idx++
+		if (this.idx < this.words.length) {
+			this.curWord = this.words[this.idx]
 			this.studyStart = Date.now()
 			this.mode = 'study'
 			this.animClass = 'animIn'
 		} else {
-			// 整个词库学完一遍（学习进度已逐词写入 srsmap，无需全量回写词库）
-			this.idx = this.words.length
-			this.mode = 'done'
-			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+			// 本批学完：更新索引+落盘进度，自动加载下一批
+			this.batchDone()
 		}
+	},
+
+	batchDone() {
+		var that = this
+		// 本批词的 SRS 新状态回写轻量索引（按行号匹配）
+		for (var i = 0; i < this.words.length; i++) {
+			var w = this.words[i]
+			for (var j = 0; j < this.index.length; j++) {
+				if (this.index[j].lineNo === w._ln) {
+					this.index[j].e = w.e; this.index[j].i = w.i; this.index[j].lvl = w.lvl
+					this.index[j].c = w.c; this.index[j].wc = w.wc; this.index[j].next = w.next
+					break
+				}
+			}
+		}
+		// 本批学习进度合并写入 srsmap（推送只替换词库，进度永不丢）
+		storage.get('srsmap', {}).then(function (map) {
+			for (var i2 = 0; i2 < that.words.length; i2++) {
+				var cw = that.words[i2]
+				map[(cw.w || '').toLowerCase()] = { e: cw.e, i: cw.i, lvl: cw.lvl, c: cw.c, wc: cw.wc, next: cw.next }
+			}
+			storage.set('srsmap', map)
+		})
+		// 释放本批完整词对象，加载下一批
+		this.words = []
+		this.answered = {}
+		try { global.runGC && global.runGC() } catch (e) { }
+		this.loadNextBatch()
 	}
 }
 </script>
