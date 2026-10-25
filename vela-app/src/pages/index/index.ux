@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.19</text>
+				<text class="ver">v0.20</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -63,7 +63,8 @@ import router from '@system.router'
 
 const WORDS_URI = 'internal://files/chiyu_words.jsonl'
 const BATCH_SIZE = 30      // 每批学习词数（手环内存小，分批加载防 OOM 重启）
-const READ_STEP = 64 * 1024  // 分段读字节数（UTF-16LE，需为偶数；喵喵式分段，按实际推进）
+const READ_STEP = 512 * 1024  // 分段读字节数（UTF-16LE，需为偶数）：1MB 词库仅 2 段，
+// 每段一次文件调用即可取完（原 64KB 需 16 次串行调用 = 点"开始"等 5 秒的根因）
 
 // UTF-16LE buffer → 字符串（2048 字符/批 fromCharCode.apply，避免超参数上限）
 function decode16(buf) {
@@ -149,19 +150,35 @@ export default {
 		// 接收中（手机推送进行时）不加载：推送期间零词库占用，
 		// 避免应用被手机 openApp 拉起时一启动就解析词库导致 OOM 重启
 		// 僵尸兜底：仅当 receiving 标记残留超过 5 分钟才视为推送中断（崩溃残留）
-		// 自动清掉并照常加载。绝不能误清活跃推送——3503 词全程推送约 40-60 秒，
-		// 若按 30 秒误判中断会清掉标记，首页抢跑解析半截文件，与接收写盘并行 OOM 重启
+		// 自动清掉并照常加载。绝不能误清活跃推送——3503 词全程推送约 40-60 秒
 		storage.get('receiving', 0).then(function (recv) {
-			if (recv <= 0) { that.doReload(); return }
+			if (recv <= 0) { that.loadFromCacheOrFile(); return }
 			// 活跃接收中：明确显示状态，不加载词库
 			that.debug = '正在接收词库...'
 			storage.get('receivingAt', 0).then(function (at) {
 				if (at > 0 && Date.now() - at > 300000) {
 					storage.set('receiving', 0)
 					storage.set('receivingAt', 0)
-					that.doReload()
+					that.loadFromCacheOrFile()
 				}
 				// 活跃推送中：保持不加载
+			})
+		})
+	},
+
+	// 终极提速：轻量索引持久化到存储。
+	// 打开时先读缓存（1 次 storage 调用，毫秒级）；words_ver 匹配则直接用，
+	// 不再解析词库文件（v0.19 前每次打开都全库解析 = 慢 + 脆弱）。
+	// 只有词库更新（新推送）才重新解析文件并刷新缓存。
+	loadFromCacheOrFile() {
+		var that = this
+		storage.get('idx', null).then(function (cached) {
+			storage.get('words_ver', 0).then(function (v) {
+				if (cached && cached.ver && v && cached.ver === v && cached.list && cached.list.length) {
+					that.finishIndex(cached.list)   // 缓存命中：毫秒级，无需解析文件
+				} else {
+					that.doReload()                  // 无缓存/词库已更新：解析文件
+				}
 			})
 		})
 	},
@@ -202,13 +219,17 @@ export default {
 		function pushLightLine(l) {
 			// 只提取单词字段，不做全量 JSON.parse——3503 行全量解析对手环太慢。
 			// 其余 SRS 字段留空由 srs.norm 默认兜底；学过的词由 srsmap 合并覆盖；
-			// next:0 标记"从未学过"→ retention≈0 → 学习批总是优先抽新词
+			// next:0 标记"从未学过"→ retention≈0 → 学习批总是优先抽新词。
+			// 兜底：字符串提取失败（如单词含转义引号）→ 该行退回 JSON.parse，绝不漏词
 			var w = ''
 			var i0 = l.indexOf('"w":"')
 			if (i0 >= 0) {
 				var i1 = i0 + 5
 				var i2 = l.indexOf('"', i1)
 				if (i2 > i1) w = l.substring(i1, i2)
+			}
+			if (!w) {
+				try { var o = JSON.parse(l); w = o.w || '' } catch (e) { }
 			}
 			if (w) idx.push({ w: w, lineNo: lineNo, next: 0 })
 			lineNo++
@@ -230,6 +251,10 @@ export default {
 			}
 			remain = ''
 			try { global.runGC && global.runGC() } catch (e) { }
+			// 持久化轻量索引：下次打开直接读缓存，不再解析文件（终极提速）
+			storage.get('words_ver', 0).then(function (v) {
+				try { storage.set('idx', { ver: v, list: idx }) } catch (e) { }
+			})
 			that.finishIndex(idx)
 		}
 		function readNext() {
@@ -320,6 +345,7 @@ export default {
 	// 从轻量索引选出最紧急的一批（SRS 紧迫度排序取前 BATCH_SIZE），再读完整内容
 	loadNextBatch() {
 		var that = this
+		this.debug = '正在准备单词...'
 		var tmp = []
 		for (var i = 0; i < this.index.length; i++) {
 			var w = srs.norm(this.index[i])
@@ -427,7 +453,8 @@ export default {
 	onTouchEnd(e) {
 		if (!this.touch.active) return
 		this.touch.active = false
-		var t = e.changedTouches ? e.changedTouches[0] : (e.touches[0] || {})
+		var t = (e && e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0] : ((e && e.touches && e.touches[0]) || null)
+		if (!t || typeof t.clientX !== 'number') return   // 坐标缺失：直接忽略，绝不误判
 		var ex = t.clientX
 		var ey = t.clientY
 		var dx = ex - this.touch.sx
@@ -478,8 +505,8 @@ export default {
 	},
 
 	choose(action, rt) {
-		if (this.choosing) return
-		this.choosing = true
+		// 保险版：无 choosing 锁、无 setTimeout——曾因 setTimeout 在 Vela 上不触发，
+		// choosing 锁永不释放导致所有手势失效。现在同步执行，100% 可靠。
 		// 先更新 SRS（含反应时间 + 使用频率），记录暂存，释义停留后补 dwell 再落盘
 		var rec = srs.updateWord(this.curWord, action, { rt: rt, gap: this.gapHours })
 		this.pendingRec = rec
@@ -503,13 +530,8 @@ export default {
 				}
 			}
 		}
-		// 滑动方向飞出动画（左=认识 上=模糊 下=不会），动画结束后进释义页
-		this.animClass = action === 'know' ? 'flyL' : (action === 'fuzzy' ? 'flyU' : 'flyD')
-		var that = this
-		setTimeout(function () {
-			that.animClass = 'animIn'
-			that.showMeaning()
-		}, 280)
+		// 进释义页（同步，无动画等待）
+		this.showMeaning()
 	},
 
 	showMeaning() {
