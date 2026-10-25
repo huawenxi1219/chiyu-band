@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.14</text>
+				<text class="ver">v0.15</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -144,37 +144,58 @@ export default {
 		var that = this
 		// 接收中（手机推送进行时）不加载：推送期间零词库占用，
 		// 避免应用被手机 openApp 拉起时一启动就解析词库导致 OOM 重启
+		// 僵尸兜底：若 receiving 标记残留超过 30 秒（推送中断崩溃所致），
+		// 自动清掉并照常加载，防止"永远 0 词"
 		storage.get('receiving', 0).then(function (recv) {
-			if (recv > 0) return
-			try {
-				file.access({
-					uri: WORDS_URI,
-					success: function () {
-						file.get({
-							uri: WORDS_URI,
-							success: function (d) { that.buildIndex((d && d.length) || 0) },
-							fail: function () { that.applyWords([]) }
-						})
-					},
-					fail: function () { that.applyWords([]) }
-				})
-			} catch (e) {
-				that.applyWords([])
-			}
+			if (recv <= 0) { that.doReload(); return }
+			storage.get('receivingAt', 0).then(function (at) {
+				if (at > 0 && Date.now() - at > 30000) {
+					storage.set('receiving', 0)
+					storage.set('receivingAt', 0)
+					that.doReload()
+				}
+				// 活跃推送中：保持不加载
+			})
 		})
 	},
 
-	// 构建轻量索引：一次读全文件（仅 1 次文件调用，快）+ 分片逐行解析
-	// 关键：每 ~512 行让出事件循环（setTimeout 0），右滑退出/返回键随时可用，
-	// 绝不长时间阻塞 UI（否则"硬控"无法退出）；只保留 SRS 字段+行号，丢弃释义
+	doReload() {
+		var that = this
+		try {
+			file.access({
+				uri: WORDS_URI,
+				success: function () {
+					file.get({
+						uri: WORDS_URI,
+						success: function (d) { that.buildIndex((d && d.length) || 0) },
+						fail: function () { that.applyWords([]) }
+					})
+				},
+				fail: function () { that.applyWords([]) }
+			})
+		} catch (e) {
+			that.applyWords([])
+		}
+	},
+
+	// 构建轻量索引：先 file.get 拿实际字节数，一次读全（仅 1 次文件调用，快）
+	// + 分片逐行解析。关键：length 必须传实际文件大小（UTF-16LE 字节数），
+	// 绝不能传 16MB 之类的大值——Vela 会按 length 直接分配同大小 buffer，
+	// 500 词文件也会分配 16MB 导致 OOM 红字重启（v0.10~v0.12、v0.14 均因此崩）。
+	// 分片让出事件循环（setTimeout 0），右滑退出/返回键随时可用，不阻塞 UI
 	buildIndex(fileSize) {
 		var that = this
+		// 防重入：分片解析进行中再次触发（words_ver 轮询/onShow 并发）会并行解析、
+		// 双份索引+buffer 叠加内存，直接跳过本次
+		if (this._indexing) return
+		this._indexing = true
 		this.debug = '词库加载中...'
+		if (!fileSize || fileSize <= 0) { this._indexing = false; this.finishIndex([]); return }
 		try {
 			file.readArrayBuffer({
 				uri: WORDS_URI,
 				position: 0,
-				length: 16 * 1024 * 1024,
+				length: fileSize,
 				success: function (data) {
 					var buf = data && data.buffer
 					if (!buf || !buf.length) { that.finishIndex([]); return }
@@ -227,6 +248,7 @@ export default {
 
 	finishIndex(idx) {
 		var that = this
+		this._indexing = false
 		// 合并学习进度：srsmap 里有的词，用手环端已学习的 SRS 状态覆盖初始值
 		storage.get('srsmap', {}).then(function (map) {
 			for (var i = 0; i < idx.length; i++) {
@@ -249,6 +271,7 @@ export default {
 	},
 
 	applyWords(list) {
+		this._indexing = false
 		this.index = list || []
 		this.totalCount = this.index.length
 		this.dueCount = 0
@@ -293,42 +316,55 @@ export default {
 		for (var k = 0; k < n; k++) want[tmp[k].lineNo] = true
 		tmp = null
 		try { global.runGC && global.runGC() } catch (e) { }
-		// 一次读全文件取这批词的完整内容（含释义），分片让出不阻塞 UI
-		this.readBatchFromFile(0, want, function (words) {
-			if (!words.length) {
-				that.mode = 'done'
-				return
-			}
-			that.words = words
-			that.batchSize = words.length
-			that.roundNo++
-			that.idx = 0
-			that.answered = {}
-			that.retryQueue = []
-			that.retryCounts = {}
-			that.sinceRetry = 0
-			that.roundDone = 0
-			that.choosing = false
-			that.animClass = 'animIn'
-			that.curWord = words[0]
-			that.studyStart = Date.now()
-			that.mode = 'study'
-			that.debug = ''
-			try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
-		})
+		// 先 file.get 拿实际字节数，再按实际大小一次读全取这批词的完整内容（含释义）
+		try {
+			file.get({
+				uri: WORDS_URI,
+				success: function (d) {
+					that.readBatchFromFile((d && d.length) || 0, want, function (words) {
+						if (!words.length) {
+							that.mode = 'done'
+							return
+						}
+						that.words = words
+						that.batchSize = words.length
+						that.roundNo++
+						that.idx = 0
+						that.answered = {}
+						that.retryQueue = []
+						that.retryCounts = {}
+						that.sinceRetry = 0
+						that.roundDone = 0
+						that.choosing = false
+						that.animClass = 'animIn'
+						that.curWord = words[0]
+						that.studyStart = Date.now()
+						that.mode = 'study'
+						that.debug = ''
+						try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+					})
+				},
+				fail: function () { that.mode = 'done' }
+			})
+		} catch (e) {
+			this.mode = 'done'
+		}
 	},
 
 	// 一次读全文件（1 次调用）+ 分片逐行匹配本批词的完整对象（附加 _ln 行号），
-	// 分片让出事件循环，取批期间不阻塞 UI
+	// 分片让出事件循环，取批期间不阻塞 UI。
+	// 关键：length 必须传实际文件大小，绝不传 16MB 等大值（否则按 length 分配
+	// 超大 buffer → OOM 红字重启）
 	readBatchFromFile(fileSize, want, cb) {
 		var out = []
 		var lineNo = 0
 		var cur = ''
+		if (!fileSize || fileSize <= 0) { cb(out); return }
 		try {
 			file.readArrayBuffer({
 				uri: WORDS_URI,
 				position: 0,
-				length: 16 * 1024 * 1024,
+				length: fileSize,
 				success: function (data) {
 					var buf = data && data.buffer
 					if (!buf || !buf.length) { cb(out); return }
