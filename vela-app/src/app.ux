@@ -170,12 +170,12 @@ globalThis.conn.on('word_push', (payload) => {
           storage.set('receiving', 0)
           storage.set('receivingAt', 0)
           storage.set('total_words', pushState.recvCount)
-        } catch (e2) { }
+        } catch (e2) { globalThis.diag('push', 'STORAGE ERR ' + e2) }
         try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e2) { }
         globalThis.conn.send('push_done', { count: pushState.recvCount, total: pushState.total })
         globalThis.diag('push', 'done, blocks saved')
         // 通知首页刷新词库
-        try { storage.set('words_ver', Date.now()) } catch (e2) { }
+        try { storage.set('words_ver', Date.now()) } catch (e2) { globalThis.diag('push', 'VER ERR ' + e2) }
         pushState.expected = 0
         pushState.recvCount = 0
         pushState.total = -1

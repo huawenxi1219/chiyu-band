@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.23</text>
+				<text class="ver">v0.24</text>
 				<text class="stat">词库共 {{totalCount}} 词 · 已同步</text>
 				<text class="stat2">开始即学最该复习的词</text>
 				<div class="btn" @click="startRound">
@@ -162,10 +162,22 @@ export default {
 
 
 	startRound() {
-		if (!this.totalCount) {
-			this.debug = '词库为空，请先用手机同步'
-			return
-		}
+		var that = this
+		if (this.totalCount > 0) { this.beginRound(); return }
+		// total_words 计数未知（storage 可能未同步）：直接探测块 0 文件——
+		// 文件在就能学，不依赖计数（v0.23 因计数为 0 直接拦截导致"有词也学不了"）
+		this.debug = '正在检查词库...'
+		this.readBlockFromFile(0, function (list) {
+			if (list && list.length) {
+				that.totalCount = list.length
+				that.beginRound()
+			} else {
+				that.debug = '词库为空，请先用手机同步'
+			}
+		})
+	},
+
+	beginRound() {
 		this.statK = 0
 		this.statF = 0
 		this.statN = 0
