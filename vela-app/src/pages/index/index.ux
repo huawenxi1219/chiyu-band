@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.21</text>
+				<text class="ver">v0.22</text>
 				<text class="stat">词库共 {{totalCount}} 词 · 已同步</text>
 				<text class="stat2">开始即学最该复习的词</text>
 				<div class="btn" @click="startRound">

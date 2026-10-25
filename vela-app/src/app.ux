@@ -71,14 +71,17 @@ function str2abUtf16(str) {
   return new Uint8Array(array.buffer)
 }
 
-// 把一块词覆盖写入该块对应文件（words_{batch}.jsonl，UTF-16LE）。
-// 每块独立文件 = 幂等：同一块重发重写同名文件，不会重复追加。
+// 把一块词写入该块对应文件（words_{batch}.jsonl，UTF-16LE）。
+// 关键：Vela 的 file.writeArrayBuffer 对"不存在的文件"用覆盖写会失败
+// （喵喵验证过的稳定链路是追加写自动建文件）。因此先删除旧块文件
+// （不存在则忽略失败），再追加写——同一块重发时先删后写，天然幂等不重复。
 function writeBlockToFile(batch, words) {
   return new Promise(function (resolve, reject) {
     var text = ''
     for (var i = 0; i < words.length; i++) {
       try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
     }
+    var uri = blockUri(batch)
     var done = false
     var timer = setTimeout(function () {
       if (!done) {
@@ -87,22 +90,27 @@ function writeBlockToFile(batch, words) {
         resolve()
       }
     }, 3000)
-    try {
-      global.runGC && global.runGC()
-      file.writeArrayBuffer({
-        uri: blockUri(batch),
-        buffer: str2abUtf16(text),
-        append: false,   // 覆盖写：同块重发重写，幂等
-        success: function () {
-          if (!done) { done = true; clearTimeout(timer); resolve() }
-        },
-        fail: function (e) {
-          if (!done) { done = true; clearTimeout(timer); reject(e) }
-        }
-      })
-    } catch (e) {
-      if (!done) { done = true; clearTimeout(timer); reject(e) }
+    function doWrite() {
+      try {
+        global.runGC && global.runGC()
+        file.writeArrayBuffer({
+          uri: uri,
+          buffer: str2abUtf16(text),
+          append: true,
+          success: function () {
+            if (!done) { done = true; clearTimeout(timer); resolve() }
+          },
+          fail: function (e) {
+            if (!done) { done = true; clearTimeout(timer); reject(e) }
+          }
+        })
+      } catch (e) {
+        if (!done) { done = true; clearTimeout(timer); reject(e) }
+      }
     }
+    try {
+      file.delete({ uri: uri, success: function () { doWrite() }, fail: function () { doWrite() } })
+    } catch (e) { doWrite() }
   })
 }
 
