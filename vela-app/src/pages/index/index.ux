@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.18</text>
+				<text class="ver">v0.19</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -127,32 +127,17 @@ export default {
 		storage.get('records', []).then(function (recs) {
 			that.gapHours = srs.estimateGapHours(recs)
 		})
-		// 诊断日志轮询：每 3 秒读一次（600ms 太频繁，Vela storage 读写有延迟且耗电，
-		// 高频轮询会拖慢主线程、加剧死机感；接收日志已截断为 24 条）
+		// 推送完成检测：words_ver 变化 → 重新加载词库（5 秒低频轮询，不占资源）。
+		// 排障期曾有的 diag 日志轮询（每 600ms 读 storage）已移除——它持续占用
+		// 主线程与存储通道，是手环"卡、退出慢、死机感"的重要来源；排障已完成
 		this.diagTimer = setInterval(function () {
-			storage.get('diag', []).then(function (arr) {
-				var list = (arr && arr.length) ? arr : (globalThis.__diag || [])
-				if (list && list.length) {
-					var n = list.length
-					that.diag1 = list[n - 1]
-					that.diag2 = (n >= 2) ? list[n - 2] : ''
-				}
-			}).catch(function () {
-				var list = globalThis.__diag || []
-				if (list.length) {
-					var n = list.length
-					that.diag1 = list[n - 1]
-					that.diag2 = (n >= 2) ? list[n - 2] : ''
-				}
-			})
-			// 推送完成检测：words_ver 变化 → 重新加载词库（推送期间页面不重启）
 			storage.get('words_ver', 0).then(function (v) {
 				if (v && v !== that.wordsVer) {
 					that.wordsVer = v
 					that.reloadWords()
 				}
 			})
-		}, 3000)
+		}, 5000)
 	},
 
 	onHide() {
@@ -215,10 +200,17 @@ export default {
 		var pos = 0
 		var remain = ''
 		function pushLightLine(l) {
-			try {
-				var o = JSON.parse(l)
-				idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
-			} catch (e) { }
+			// 只提取单词字段，不做全量 JSON.parse——3503 行全量解析对手环太慢。
+			// 其余 SRS 字段留空由 srs.norm 默认兜底；学过的词由 srsmap 合并覆盖；
+			// next:0 标记"从未学过"→ retention≈0 → 学习批总是优先抽新词
+			var w = ''
+			var i0 = l.indexOf('"w":"')
+			if (i0 >= 0) {
+				var i1 = i0 + 5
+				var i2 = l.indexOf('"', i1)
+				if (i2 > i1) w = l.substring(i1, i2)
+			}
+			if (w) idx.push({ w: w, lineNo: lineNo, next: 0 })
 			lineNo++
 		}
 		function parseText(text) {

@@ -274,7 +274,7 @@ class WordPushActivity : ComponentActivity() {
                     val rg = CompletableDeferred<Unit>()
                     readyGate = rg
                     conn.sendMessage("""{"tag":"word_push_start","total":$total}""").await()
-                    val got = withTimeoutOrNull(6000) { rg.await() }
+                    val got = withTimeoutOrNull(10000) { rg.await() }
                     readyGate = null
                     if (got != null) { readyOk = true; break }
                     statusText = "手环端未就绪，第 ${attempt + 1} 次尝试拉起应用..."
@@ -303,14 +303,15 @@ class WordPushActivity : ComponentActivity() {
                     conn.sendMessage(payload).await()
                     val g = CompletableDeferred<Int>()
                     gate = g
-                    val next = withTimeoutOrNull(10000) { g.await() }
+                    val next = withTimeoutOrNull(20000) { g.await() }
                     gate = null
                     if (next == null) {
                         retries++
                         if (retries >= 3) {
-                            throw Exception("手环端确认超时（块 ${cur + 1}/$total 无回应）：请确认手环上「池鱼单词」显示 v0.8 且保持亮屏，然后重试")
+                            throw Exception("手环端确认超时（块 ${cur + 1}/$total 无回应）：请确认手环上「池鱼单词」显示 v0.19 且保持亮屏，然后重试")
                         }
                         statusText = "块 ${cur + 1}/$total 无确认，正在重发..."
+                        delay(1000)
                         continue
                     }
                     retries = 0
