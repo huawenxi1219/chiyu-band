@@ -7,8 +7,21 @@ import brightness from '@system.brightness'
 
 globalThis.conn = new Interconn()
 
-// 词库文件（推送时边收边写，避免收齐后一次性大对象数组驻留内存导致 OOM 重启）
-const WORDS_URI = 'internal://files/chiyu_words.jsonl'
+// 词库文件：v0.21 起按块拆成独立小文件（words_0.jsonl ... words_31.jsonl）。
+// 学习时一次只读一块（约 150KB），从根上避免"全库解析 1MB 文件"——
+// 手环 Vela 运行时对整库 JSON 解析的内存/CPU 承受不了，是反复 OOM 重启的总根源。
+// 每块一个文件还天然解决：序号校验、断点重推、不漏词（块文件行数=手机端发来的词数）。
+const MAX_BLOCKS = 32
+function blockUri(b) { return 'internal://files/chiyu_block_' + b + '.jsonl' }
+
+// 接收开始：清掉旧词库（旧分块文件 + 历史单文件词库，忽略删除失败）
+function clearOldWords() {
+  try { file.delete({ uri: 'internal://files/chiyu_words.jsonl', success: function () { }, fail: function () { } }) } catch (e) { }
+  for (var b = 0; b < MAX_BLOCKS; b++) {
+    try { file.delete({ uri: blockUri(b), success: function () { }, fail: function () { } }) } catch (e) { }
+  }
+  try { storage.set('total_words', 0) } catch (e) { }
+}
 
 // 诊断日志：记录每条关键消息，写入共享存储（跨应用实例可见，首页轮询显示）
 globalThis.__diag = []
@@ -58,12 +71,9 @@ function str2abUtf16(str) {
   return new Uint8Array(array.buffer)
 }
 
-// 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
-// 喵喵基准：20KB 大块一次写已验证稳定（其小说数 MB 上传不重启）。
-// 我们 16KB 块一次写同样安全；写前 runGC 压峰值。
-// 兜底：writeArrayBuffer 偶发"永不回调"（Vela 文件 API 不稳定）→ 3 秒超时视为完成，
-// 绝不让推送卡死
-function appendWordsToFile(words) {
+// 把一块词覆盖写入该块对应文件（words_{batch}.jsonl，UTF-16LE）。
+// 每块独立文件 = 幂等：同一块重发重写同名文件，不会重复追加。
+function writeBlockToFile(batch, words) {
   return new Promise(function (resolve, reject) {
     var text = ''
     for (var i = 0; i < words.length; i++) {
@@ -73,16 +83,16 @@ function appendWordsToFile(words) {
     var timer = setTimeout(function () {
       if (!done) {
         done = true
-        globalThis.diag('push', 'WRITE TIMEOUT skip ' + words.length)
+        globalThis.diag('push', 'WRITE TIMEOUT skip b' + batch)
         resolve()
       }
     }, 3000)
     try {
       global.runGC && global.runGC()
       file.writeArrayBuffer({
-        uri: WORDS_URI,
+        uri: blockUri(batch),
         buffer: str2abUtf16(text),
-        append: true,
+        append: false,   // 覆盖写：同块重发重写，幂等
         success: function () {
           if (!done) { done = true; clearTimeout(timer); resolve() }
         },
@@ -113,9 +123,7 @@ globalThis.conn.on('word_push_start', (payload) => {
       storage.set('receivingAt', Date.now())
     } catch (e) { }
     // 开始新一轮推送前清空旧词库文件（防半截残留/重复追加）
-    try {
-      file.delete({ uri: WORDS_URI, success: function () { }, fail: function () { } })
-    } catch (e) { }
+    try { clearOldWords() } catch (e) { }
     // 强制屏幕常亮：手环应用熄屏/后台时收不到 interconnect 消息，必须保持前台
     try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
     globalThis.conn.send('push_ready', { ok: true, total: pushState.total })
@@ -139,8 +147,8 @@ globalThis.conn.on('word_push', (payload) => {
       globalThis.diag('push', 'mismatch, req ' + pushState.expected)
       return
     }
-    // 边收边写文件（先写盘再回确认，保证块顺序与文件一致）
-    appendWordsToFile(words).then(function () {
+    // 边收边写块文件（每块独立文件，覆盖写幂等；先写盘再回确认）
+    writeBlockToFile(batch, words).then(function () {
       pushState.expected++
       pushState.recvCount += words.length
       // 每 10 块主动垃圾回收（仿喵喵电子书，防内存累积触发系统杀进程）
@@ -148,15 +156,17 @@ globalThis.conn.on('word_push', (payload) => {
         try { global.runGC && global.runGC() } catch (e) { }
       }
       if (pushState.expected >= pushState.total) {
-        // 收齐：文件已是完整词库，直接完成（学习进度独立存 srsmap，无需合并）
+        // 收齐：全部块文件已落盘（每块行数=手机端发来的词数，天然不漏词）。
+        // 学习进度独立存 srsmap，无需合并
         globalThis.diag('push', 'all received ' + pushState.recvCount)
         try {
           storage.set('receiving', 0)
           storage.set('receivingAt', 0)
+          storage.set('total_words', pushState.recvCount)
         } catch (e2) { }
         try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e2) { }
         globalThis.conn.send('push_done', { count: pushState.recvCount, total: pushState.total })
-        globalThis.diag('push', 'done, file saved')
+        globalThis.diag('push', 'done, blocks saved')
         // 通知首页刷新词库
         try { storage.set('words_ver', Date.now()) } catch (e2) { }
         pushState.expected = 0
@@ -174,10 +184,10 @@ globalThis.conn.on('word_push', (payload) => {
       pushState.recvCount += words.length
       if (pushState.expected >= pushState.total) {
         globalThis.diag('push', 'all received ' + pushState.recvCount + ' (partial)')
-        try { storage.set('receiving', 0) } catch (e2) { }
+        try { storage.set('receiving', 0); storage.set('total_words', pushState.recvCount) } catch (e2) { }
         try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e2) { }
         globalThis.conn.send('push_done', { count: pushState.recvCount, total: pushState.total })
-        globalThis.diag('push', 'done, file saved (partial)')
+        globalThis.diag('push', 'done, blocks saved (partial)')
         try { storage.set('words_ver', Date.now()) } catch (e2) { }
         pushState.expected = 0
         pushState.recvCount = 0

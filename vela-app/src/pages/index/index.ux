@@ -5,9 +5,9 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.20</text>
-				<text class="stat">今日待复习 {{dueCount}} 词</text>
-				<text class="stat2">词库共 {{totalCount}} 词</text>
+				<text class="ver">v0.21</text>
+				<text class="stat">词库共 {{totalCount}} 词 · 已同步</text>
+				<text class="stat2">开始即学最该复习的词</text>
 				<div class="btn" @click="startRound">
 					<text class="btnText">开始背单词</text>
 				</div>
@@ -61,10 +61,15 @@ import brightness from '@system.brightness'
 import app from '@system.app'
 import router from '@system.router'
 
-const WORDS_URI = 'internal://files/chiyu_words.jsonl'
+// v0.21 块架构：词库按块拆成独立小文件（app.ux 推送时写 chiyu_block_N.jsonl），
+// 学习时一次只读一块（约 130 词 / 150KB），彻底告别"全库解析 1MB 文件"——
+// 那是手环 Vela 运行时反复 OOM 重启的总根源
+const MAX_BLOCKS = 32
 const BATCH_SIZE = 30      // 每批学习词数（手环内存小，分批加载防 OOM 重启）
-const READ_STEP = 512 * 1024  // 分段读字节数（UTF-16LE，需为偶数）：1MB 词库仅 2 段，
-// 每段一次文件调用即可取完（原 64KB 需 16 次串行调用 = 点"开始"等 5 秒的根因）
+const READ_STEP = 128 * 1024  // 块文件内分段读字节数（UTF-16LE，需为偶数）；
+// 每块 ~150KB 只需 1-2 次文件调用，点"开始"秒出词
+
+function blockUri(b) { return 'internal://files/chiyu_block_' + b + '.jsonl' }
 
 // UTF-16LE buffer → 字符串（2048 字符/批 fromCharCode.apply，避免超参数上限）
 function decode16(buf) {
@@ -87,6 +92,7 @@ export default {
 		index: [],           // 轻量索引：全库词仅存 SRS 字段+行号（不存释义，内存可控）
 		words: [],           // 当前批次完整词对象（≤BATCH_SIZE 个）
 		roundNo: 0,          // 当前批次序号（第几批）
+		curBlock: 0,         // 当前学习块（0..MAX_BLOCKS-1，逐块推进）
 		batchSize: 0,        // 当前批次词数
 		answered: {},        // 本批已答过的词（防重复）
 		idx: 0,
@@ -118,24 +124,27 @@ export default {
 	touch: { sx: 0, sy: 0, active: false },
 
 	onShow() {
-		// 延迟 300ms 再加载词库：手机 openApp 拉起时，让 conn 握手/推送标记
-		// （receiving）先落地，避免"拉起瞬间就开始解析 + 推送写盘并行"导致 OOM 重启
 		var that = this
-		setTimeout(function () { that.reloadWords() }, 300)
+		// 块架构：打开只读 storage（total_words / receiving），毫秒级，绝不解析文件
+		storage.get('total_words', 0).then(function (n) { that.totalCount = n || 0 })
+		storage.get('receiving', 0).then(function (recv) {
+			if (recv > 0) that.debug = '正在接收词库...'
+		})
 		// 手环端应用就绪后主动回报握手（配合手机端推送前等待，防止启动慢丢消息）
 		try { globalThis.conn && globalThis.conn.send('__hs__', { count: 1 }) } catch (e) { }
 		// 打开时估算使用频率，让算法动态定基础间隔（高频→几小时巩固）
 		storage.get('records', []).then(function (recs) {
 			that.gapHours = srs.estimateGapHours(recs)
 		})
-		// 推送完成检测：words_ver 变化 → 重新加载词库（5 秒低频轮询，不占资源）。
-		// 排障期曾有的 diag 日志轮询（每 600ms 读 storage）已移除——它持续占用
-		// 主线程与存储通道，是手环"卡、退出慢、死机感"的重要来源；排障已完成
+		// 推送完成检测：words_ver 变化 → 刷新词库总数（5 秒低频轮询，不占资源）
 		this.diagTimer = setInterval(function () {
 			storage.get('words_ver', 0).then(function (v) {
 				if (v && v !== that.wordsVer) {
 					that.wordsVer = v
-					that.reloadWords()
+					storage.get('total_words', 0).then(function (n) {
+						that.totalCount = n || 0
+						that.debug = ''
+					})
 				}
 			})
 		}, 5000)
@@ -145,191 +154,10 @@ export default {
 		if (this.diagTimer) { clearInterval(this.diagTimer); this.diagTimer = null }
 	},
 
-	reloadWords() {
-		var that = this
-		// 接收中（手机推送进行时）不加载：推送期间零词库占用，
-		// 避免应用被手机 openApp 拉起时一启动就解析词库导致 OOM 重启
-		// 僵尸兜底：仅当 receiving 标记残留超过 5 分钟才视为推送中断（崩溃残留）
-		// 自动清掉并照常加载。绝不能误清活跃推送——3503 词全程推送约 40-60 秒
-		storage.get('receiving', 0).then(function (recv) {
-			if (recv <= 0) { that.loadFromCacheOrFile(); return }
-			// 活跃接收中：明确显示状态，不加载词库
-			that.debug = '正在接收词库...'
-			storage.get('receivingAt', 0).then(function (at) {
-				if (at > 0 && Date.now() - at > 300000) {
-					storage.set('receiving', 0)
-					storage.set('receivingAt', 0)
-					that.loadFromCacheOrFile()
-				}
-				// 活跃推送中：保持不加载
-			})
-		})
-	},
 
-	// 终极提速：轻量索引持久化到存储。
-	// 打开时先读缓存（1 次 storage 调用，毫秒级）；words_ver 匹配则直接用，
-	// 不再解析词库文件（v0.19 前每次打开都全库解析 = 慢 + 脆弱）。
-	// 只有词库更新（新推送）才重新解析文件并刷新缓存。
-	loadFromCacheOrFile() {
-		var that = this
-		storage.get('idx', null).then(function (cached) {
-			storage.get('words_ver', 0).then(function (v) {
-				if (cached && cached.ver && v && cached.ver === v && cached.list && cached.list.length) {
-					that.finishIndex(cached.list)   // 缓存命中：毫秒级，无需解析文件
-				} else {
-					that.doReload()                  // 无缓存/词库已更新：解析文件
-				}
-			})
-		})
-	},
-
-	doReload() {
-		var that = this
-		try {
-			file.access({
-				uri: WORDS_URI,
-				success: function () {
-					file.get({
-						uri: WORDS_URI,
-						success: function (d) { that.buildIndex((d && d.length) || 0) },
-						fail: function () { that.applyWords([]) }
-					})
-				},
-				fail: function () { that.applyWords([]) }
-			})
-		} catch (e) {
-			that.applyWords([])
-		}
-	},
-
-	// 构建轻量索引：喵喵式分段读（READ_STEP=128KB 字节，按"实际读到的字节数"推进，
-	// 读到空即结束——彻底绕开 file.get length 单位歧义，v0.15 曾因该单位问题只读半份文件）。
-	// 段间靠文件 API 异步回调天然让出事件循环（手势/退出随时可用），
-	// 不用 setTimeout 递归（Vela 上递归 setTimeout 有栈溢出→卡死重启风险）。
-	// 每段读前检查 receiving：手机推送进行中立即中止，防"接收写盘 + 解析"并行 OOM。
-	buildIndex() {
-		var that = this
-		if (this._indexing) return
-		this._indexing = true
-		this.debug = '词库加载中...'
-		var idx = []
-		var lineNo = 0
-		var pos = 0
-		var remain = ''
-		function pushLightLine(l) {
-			// 只提取单词字段，不做全量 JSON.parse——3503 行全量解析对手环太慢。
-			// 其余 SRS 字段留空由 srs.norm 默认兜底；学过的词由 srsmap 合并覆盖；
-			// next:0 标记"从未学过"→ retention≈0 → 学习批总是优先抽新词。
-			// 兜底：字符串提取失败（如单词含转义引号）→ 该行退回 JSON.parse，绝不漏词
-			var w = ''
-			var i0 = l.indexOf('"w":"')
-			if (i0 >= 0) {
-				var i1 = i0 + 5
-				var i2 = l.indexOf('"', i1)
-				if (i2 > i1) w = l.substring(i1, i2)
-			}
-			if (!w) {
-				try { var o = JSON.parse(l); w = o.w || '' } catch (e) { }
-			}
-			if (w) idx.push({ w: w, lineNo: lineNo, next: 0 })
-			lineNo++
-		}
-		function parseText(text) {
-			var parts = text.split('\n')
-			remain = parts.pop()   // 段尾残留可能是不完整行，拼到下一段
-			for (var k = 0; k < parts.length; k++) {
-				var l = parts[k].trim()
-				if (l) pushLightLine(l)
-			}
-			// 每段更新一次进度（不频繁刷新 UI），让用户看到在动、不是假死
-			that.debug = '词库加载中 ' + lineNo + ' 词'
-		}
-		function finishLight() {
-			if (remain) {
-				var l = remain.trim()
-				if (l) { try { pushLightLine(l) } catch (e) { } }
-			}
-			remain = ''
-			try { global.runGC && global.runGC() } catch (e) { }
-			// 持久化轻量索引：下次打开直接读缓存，不再解析文件（终极提速）
-			storage.get('words_ver', 0).then(function (v) {
-				try { storage.set('idx', { ver: v, list: idx }) } catch (e) { }
-			})
-			that.finishIndex(idx)
-		}
-		function readNext() {
-			// 每 4 段检查一次接收中标记（storage.get 有延迟，逐段查太慢）：
-			// 推送进行时立即中止，绝不与写盘并行解析（最多多解析 4 段就被拦下）
-			if (checkCount % 4 === 0) {
-				checkCount++
-				storage.get('receiving', 0).then(function (recv) {
-					if (recv > 0) { that._indexing = false; that.applyWords([]); return }
-					readSegment()
-				})
-			} else {
-				checkCount++
-				readSegment()
-			}
-		}
-		function readSegment() {
-			try {
-				file.readArrayBuffer({
-					uri: WORDS_URI,
-					position: pos,
-					length: READ_STEP,
-					success: function (data) {
-						var buf = data && data.buffer
-						if (!buf || !buf.length) { finishLight(); return }
-						parseText(decode16(buf))
-						pos += buf.length          // 按实际读到的字节推进
-						readNext()                 // 文件回调天然让出事件循环
-					},
-					fail: function () { finishLight() }
-				})
-			} catch (e) { finishLight() }
-		}
-		var checkCount = 0
-		readNext()
-	},
-
-	finishIndex(idx) {
-		var that = this
-		this._indexing = false
-		// 合并学习进度：srsmap 里有的词，用手环端已学习的 SRS 状态覆盖初始值
-		storage.get('srsmap', {}).then(function (map) {
-			for (var i = 0; i < idx.length; i++) {
-				var s = map[(idx[i].w || '').toLowerCase()]
-				if (s) {
-					idx[i].e = s.e; idx[i].i = s.i; idx[i].lvl = s.lvl
-					idx[i].c = s.c; idx[i].wc = s.wc; idx[i].next = s.next
-				}
-			}
-			that.index = idx || []
-			that.totalCount = that.index.length
-			var due = 0
-			for (var j = 0; j < that.index.length; j++) {
-				var w2 = srs.norm(that.index[j])
-				if (srs.retention(w2) < 0.9) due++
-			}
-			that.dueCount = due
-			that.debug = ''
-		})
-	},
-
-	applyWords(list) {
-		this._indexing = false
-		this.index = list || []
-		this.totalCount = this.index.length
-		this.dueCount = 0
-		this.debug = ''
-	},
 
 	startRound() {
-		if (this._indexing) {
-			this.debug = '词库加载中，请稍候'
-			return
-		}
-		if (!this.index || !this.index.length) {
+		if (!this.totalCount) {
 			this.debug = '词库为空，请先用手机同步'
 			return
 		}
@@ -339,98 +167,114 @@ export default {
 		this.pendingRec = null
 		this.retryCount = 0
 		this.debug = ''
+		// 从块 0 开始学习（每块取最该复习的 BATCH_SIZE 个词，逐块推进）
+		this.curBlock = 0
 		this.loadNextBatch()
 	},
 
-	// 从轻量索引选出最紧急的一批（SRS 紧迫度排序取前 BATCH_SIZE），再读完整内容
+	// 块架构学习批：读当前块（1 次小文件读，~150KB）→ 合并 SRS 进度 →
+	// 按遗忘曲线紧迫度排序 → 取最该复习的 BATCH_SIZE 个词。
+	// 每批学完推进到下一块；全部块轮完一轮 → 今日完成。
 	loadNextBatch() {
 		var that = this
 		this.debug = '正在准备单词...'
-		var tmp = []
-		for (var i = 0; i < this.index.length; i++) {
-			var w = srs.norm(this.index[i])
-			if (srs.retention(w) < 0.9) {
-				tmp.push({ ret: srs.retention(w), lineNo: this.index[i].lineNo })
-			}
-		}
-		tmp.sort(function (a, b) { return a.ret - b.ret })
-		if (!tmp.length) {
-			// 全部按计划复习完毕
-			this.mode = 'done'
-			this.idx = 0
-			this.words = []
-			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
-			return
-		}
-		var want = {}
-		var n = Math.min(BATCH_SIZE, tmp.length)
-		for (var k = 0; k < n; k++) want[tmp[k].lineNo] = true
-		tmp = null
-		try { global.runGC && global.runGC() } catch (e) { }
-		// 分段读文件取这批词的完整内容（含释义），按实际字节推进，取批不卡 UI
-		this.readBatchFromFile(want, function (words) {
-			if (!words.length) {
-				that.mode = 'done'
+		var blk = this.curBlock
+		this.readBlockFromFile(blk, function (list) {
+			if (!list.length) {
+				// 该块为空（未同步/已删）：跳到下一块继续找，32 块都空则完成
+				that.skipEmptyBlocks(blk)
 				return
 			}
-			that.words = words
-			that.batchSize = words.length
-			that.roundNo++
-			that.idx = 0
-			that.answered = {}
-			that.retryQueue = []
-			that.retryCounts = {}
-			that.sinceRetry = 0
-			that.roundDone = 0
-			that.choosing = false
-			that.animClass = 'animIn'
-			that.curWord = words[0]
-			that.studyStart = Date.now()
-			that.mode = 'study'
-			that.debug = ''
-			try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+			// 合并学习进度 + 排序取最紧迫
+			storage.get('srsmap', {}).then(function (map) {
+				var tmp = []
+				for (var i = 0; i < list.length; i++) {
+					var w = list[i]
+					var s = map[(w.w || '').toLowerCase()]
+					if (s) {
+						w.e = s.e; w.i = s.i; w.lvl = s.lvl
+						w.c = s.c; w.wc = s.wc; w.next = s.next
+					}
+					var w2 = srs.norm(w)
+					tmp.push({ ret: srs.retention(w2), word: w })
+				}
+				tmp.sort(function (a, b) { return a.ret - b.ret })
+				var n = Math.min(BATCH_SIZE, tmp.length)
+				var words = []
+				for (var k = 0; k < n; k++) words.push(tmp[k].word)
+				tmp = null
+				try { global.runGC && global.runGC() } catch (e) { }
+				if (!words.length) {
+					that.skipEmptyBlocks(blk)
+					return
+				}
+				that.words = words
+				that.batchSize = words.length
+				that.roundNo++
+				that.idx = 0
+				that.answered = {}
+				that.retryQueue = []
+				that.retryCounts = {}
+				that.sinceRetry = 0
+				that.roundDone = 0
+				that.animClass = 'animIn'
+				that.curWord = words[0]
+				that.studyStart = Date.now()
+				that.mode = 'study'
+				that.debug = ''
+				try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+			})
 		})
 	},
 
-	// 分段读文件 + 按行号匹配本批词的完整对象（附加 _ln 行号）
-	// 喵喵式分段：READ_STEP 字节/段，按"实际读到的字节数"推进，读到空即结束，
-	// 不依赖 file.get length 单位；段间靠文件 API 异步回调天然让出事件循环，
-	// 不用 setTimeout 递归（Vela 上递归 setTimeout 有栈溢出→卡死重启风险）
-	readBatchFromFile(want, cb) {
+	// 当前块为空：跳过它继续找下一块；32 块全空 → 今日完成
+	skipEmptyBlocks(fromBlk) {
+		var next = fromBlk + 1
+		if (next >= MAX_BLOCKS) {
+			this.mode = 'done'
+			this.words = []
+			this.debug = ''
+			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+			return
+		}
+		this.curBlock = next
+		this.loadNextBatch()
+	},
+
+	// 读一块词库文件（分段，按实际字节推进；文件回调天然让出事件循环）
+	readBlockFromFile(block, cb) {
 		var out = []
-		var lineNo = 0
 		var pos = 0
 		var remain = ''
-		function parseBatch(text) {
+		var uri = blockUri(block)
+		function parseBlock(text) {
 			var parts = text.split('\n')
 			remain = parts.pop()
 			for (var k = 0; k < parts.length; k++) {
 				var l = parts[k].trim()
 				if (l) {
-					if (want[lineNo]) {
-						try { var o = JSON.parse(l); o._ln = lineNo; out.push(o) } catch (e) { }
-					}
-					lineNo++
+					try { out.push(JSON.parse(l)) } catch (e) { }
 				}
 			}
 		}
 		function readNext() {
 			try {
 				file.readArrayBuffer({
-					uri: WORDS_URI,
+					uri: uri,
 					position: pos,
 					length: READ_STEP,
 					success: function (data) {
 						var buf = data && data.buffer
 						if (!buf || !buf.length) {
-							if (remain && want[lineNo]) {
-								try { var o = JSON.parse(remain.trim()); o._ln = lineNo; out.push(o) } catch (e) { }
+							if (remain) {
+								var l = remain.trim()
+								if (l) { try { out.push(JSON.parse(l)) } catch (e) { } }
 							}
 							try { global.runGC && global.runGC() } catch (e) { }
 							cb(out)
 							return
 						}
-						parseBatch(decode16(buf))
+						parseBlock(decode16(buf))
 						pos += buf.length          // 按实际读到的字节推进
 						readNext()                 // 文件回调天然让出事件循环
 					},
@@ -590,17 +434,6 @@ export default {
 
 	batchDone() {
 		var that = this
-		// 本批词的 SRS 新状态回写轻量索引（按行号匹配）
-		for (var i = 0; i < this.words.length; i++) {
-			var w = this.words[i]
-			for (var j = 0; j < this.index.length; j++) {
-				if (this.index[j].lineNo === w._ln) {
-					this.index[j].e = w.e; this.index[j].i = w.i; this.index[j].lvl = w.lvl
-					this.index[j].c = w.c; this.index[j].wc = w.wc; this.index[j].next = w.next
-					break
-				}
-			}
-		}
 		// 本批学习进度合并写入 srsmap（推送只替换词库，进度永不丢）
 		storage.get('srsmap', {}).then(function (map) {
 			for (var i2 = 0; i2 < that.words.length; i2++) {
@@ -609,10 +442,20 @@ export default {
 			}
 			storage.set('srsmap', map)
 		})
-		// 释放本批完整词对象，加载下一批
+		// 释放本批完整词对象，推进到下一块
 		this.words = []
 		this.answered = {}
 		try { global.runGC && global.runGC() } catch (e) { }
+		this.curBlock++
+		if (this.curBlock >= MAX_BLOCKS) {
+			// 全部块轮完一轮 → 今日完成（每块每轮取最紧迫的 BATCH_SIZE 个词）
+			this.curBlock = 0
+			this.mode = 'done'
+			this.idx = 0
+			this.debug = ''
+			try { brightness.setKeepScreenOn({ keepScreenOn: false }) } catch (e) { }
+			return
+		}
 		this.loadNextBatch()
 	}
 }
