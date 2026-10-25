@@ -14,12 +14,15 @@ globalThis.conn = new Interconn()
 const MAX_BLOCKS = 32
 function blockUri(b) { return 'internal://files/chiyu_block_' + b + '.jsonl' }
 
-// 接收开始：清掉旧单文件词库 + 重置计数。
-// 注意：不逐块循环删除旧块文件（32 次 file.delete 会占大量时间拖慢推送），
-// 每块由 writeBlockToFile 写前单独 delete，天然幂等。
+// 接收开始：清掉旧单文件词库 + 重置计数与已写标记。
+// 不逐块循环删除块文件（32 次 file.delete 拖慢推送且回调可能不触发），
+// 幂等由每块的 b_done 标记保证
 function clearOldWords() {
   try { file.delete({ uri: 'internal://files/chiyu_words.jsonl', success: function () { }, fail: function () { } }) } catch (e) { }
-  try { storage.set('total_words', 0) } catch (e) { }
+  try {
+    storage.set('total_words', 0)
+    storage.set('b_done', {})
+  } catch (e) { }
 }
 
 // 诊断日志：记录每条关键消息，写入共享存储（跨应用实例可见，首页轮询显示）
@@ -70,35 +73,41 @@ function str2abUtf16(str) {
   return new Uint8Array(array.buffer)
 }
 
-// 把一块词写入该块对应文件（words_{batch}.jsonl，UTF-16LE）。
-// 关键：Vela 的 file.writeArrayBuffer 对"不存在的文件"用覆盖写会失败
-// （喵喵验证过的稳定链路是追加写自动建文件）。因此先删除旧块文件
-// （不存在则忽略失败），再追加写——同一块重发时先删后写，天然幂等不重复。
+// 把一块词追加写入该块对应文件（words_{batch}.jsonl，UTF-16LE）。
+// 幂等方案（v0.25）：不删旧文件——file.delete 的回调在 Vela 上可能不触发，
+// 会卡住后续写入（v0.22~v0.24 全部块写盘被跳过、手机却显示成功的根因）。
+// 改为用 storage 标记 b_done：该块已写过则跳过，同块重发不会重复追加。
 function writeBlockToFile(batch, words) {
   return new Promise(function (resolve, reject) {
-    var text = ''
-    for (var i = 0; i < words.length; i++) {
-      try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
-    }
-    var uri = blockUri(batch)
-    var done = false
-    var timer = setTimeout(function () {
-      if (!done) {
-        done = true
-        globalThis.diag('push', 'WRITE TIMEOUT skip b' + batch)
-        resolve()
+    storage.get('b_done', {}).then(function (doneMap) {
+      if (doneMap && doneMap['b' + batch]) { resolve(); return }
+      var text = ''
+      for (var i = 0; i < words.length; i++) {
+        try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
       }
-    }, 3000)
-    function doWrite() {
+      var uri = blockUri(batch)
+      var done = false
+      var timer = setTimeout(function () {
+        if (!done) {
+          done = true
+          globalThis.diag('push', 'WRITE TIMEOUT skip b' + batch)
+          resolve()
+        }
+      }, 3000)
+      function markAndResolve() {
+        try {
+          doneMap['b' + batch] = true
+          storage.set('b_done', doneMap)
+        } catch (e2) { }
+        if (!done) { done = true; clearTimeout(timer); resolve() }
+      }
       try {
         global.runGC && global.runGC()
         file.writeArrayBuffer({
           uri: uri,
           buffer: str2abUtf16(text),
           append: true,
-          success: function () {
-            if (!done) { done = true; clearTimeout(timer); resolve() }
-          },
+          success: markAndResolve,
           fail: function (e) {
             if (!done) { done = true; clearTimeout(timer); reject(e) }
           }
@@ -106,10 +115,7 @@ function writeBlockToFile(batch, words) {
       } catch (e) {
         if (!done) { done = true; clearTimeout(timer); reject(e) }
       }
-    }
-    try {
-      file.delete({ uri: uri, success: function () { doWrite() }, fail: function () { doWrite() } })
-    } catch (e) { doWrite() }
+    })
   })
 }
 
