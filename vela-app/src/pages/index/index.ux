@@ -5,7 +5,7 @@
 		<div if="{{mode === 'home'}}" class="home">
 			<div class="homeCard">
 				<text class="appName">池鱼单词</text>
-				<text class="ver">v0.15</text>
+				<text class="ver">v0.16</text>
 				<text class="stat">今日待复习 {{dueCount}} 词</text>
 				<text class="stat2">词库共 {{totalCount}} 词</text>
 				<div class="btn" @click="startRound">
@@ -63,6 +63,22 @@ import router from '@system.router'
 
 const WORDS_URI = 'internal://files/chiyu_words.jsonl'
 const BATCH_SIZE = 30      // 每批学习词数（手环内存小，分批加载防 OOM 重启）
+const READ_STEP = 64 * 1024  // 分段读字节数（UTF-16LE，需为偶数；喵喵式分段，按实际推进）
+
+// UTF-16LE buffer → 字符串（2048 字符/批 fromCharCode.apply，避免超参数上限）
+function decode16(buf) {
+	var out = ''
+	var total = buf.length >> 1
+	for (var p = 0; p < total; p += 2048) {
+		var n = Math.min(2048, total - p)
+		var arr = []
+		for (var q = 0; q < n; q++) {
+			arr.push(buf[(p + q) * 2 + 1] * 256 + buf[(p + q) * 2])
+		}
+		out += String.fromCharCode.apply(null, arr)
+	}
+	return out
+}
 
 export default {
 	private: {
@@ -101,11 +117,13 @@ export default {
 	touch: { sx: 0, sy: 0, active: false },
 
 	onShow() {
-		this.reloadWords()
+		// 延迟 300ms 再加载词库：手机 openApp 拉起时，让 conn 握手/推送标记
+		// （receiving）先落地，避免"拉起瞬间就开始解析 + 推送写盘并行"导致 OOM 重启
+		var that = this
+		setTimeout(function () { that.reloadWords() }, 300)
 		// 手环端应用就绪后主动回报握手（配合手机端推送前等待，防止启动慢丢消息）
 		try { globalThis.conn && globalThis.conn.send('__hs__', { count: 1 }) } catch (e) { }
 		// 打开时估算使用频率，让算法动态定基础间隔（高频→几小时巩固）
-		var that = this
 		storage.get('records', []).then(function (recs) {
 			that.gapHours = srs.estimateGapHours(recs)
 		})
@@ -178,72 +196,68 @@ export default {
 		}
 	},
 
-	// 构建轻量索引：先 file.get 拿实际字节数，一次读全（仅 1 次文件调用，快）
-	// + 分片逐行解析。关键：length 必须传实际文件大小（UTF-16LE 字节数），
-	// 绝不能传 16MB 之类的大值——Vela 会按 length 直接分配同大小 buffer，
-	// 500 词文件也会分配 16MB 导致 OOM 红字重启（v0.10~v0.12、v0.14 均因此崩）。
-	// 分片让出事件循环（setTimeout 0），右滑退出/返回键随时可用，不阻塞 UI
-	buildIndex(fileSize) {
+	// 构建轻量索引：喵喵式分段读（READ_STEP=128KB 字节，按"实际读到的字节数"推进，
+	// 读到空即结束——彻底绕开 file.get length 单位歧义，v0.15 曾因该单位问题只读半份文件）。
+	// 段间靠文件 API 异步回调天然让出事件循环（手势/退出随时可用），
+	// 不用 setTimeout 递归（Vela 上递归 setTimeout 有栈溢出→卡死重启风险）。
+	// 每段读前检查 receiving：手机推送进行中立即中止，防"接收写盘 + 解析"并行 OOM。
+	buildIndex() {
 		var that = this
-		// 防重入：分片解析进行中再次触发（words_ver 轮询/onShow 并发）会并行解析、
-		// 双份索引+buffer 叠加内存，直接跳过本次
 		if (this._indexing) return
 		this._indexing = true
 		this.debug = '词库加载中...'
-		if (!fileSize || fileSize <= 0) { this._indexing = false; this.finishIndex([]); return }
-		try {
-			file.readArrayBuffer({
-				uri: WORDS_URI,
-				position: 0,
-				length: fileSize,
-				success: function (data) {
-					var buf = data && data.buffer
-					if (!buf || !buf.length) { that.finishIndex([]); return }
-					var idx = []
-					var lineNo = 0
-					var cur = ''
-					var i = 0
-					var total = buf.length
-					function processSlice() {
-						var limit = Math.min(total, i + 512 * 64 * 2)   // 每片约 512 行
-						while (i < limit) {
-							var c = String.fromCharCode(buf[i + 1] * 256 + buf[i])
-							i += 2
-							if (c === '\n') {
-								var l = cur.trim()
-								if (l) {
-									try {
-										var o = JSON.parse(l)
-										idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
-									} catch (e) { }
-									lineNo++
-								}
-								cur = ''
-							} else {
-								cur += c
-							}
-						}
-						if (i < total) {
-							setTimeout(processSlice, 0)   // 让出事件循环：手势/退出可用
-						} else {
-							if (cur.trim()) {
-								try {
-									var o = JSON.parse(cur.trim())
-									idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
-								} catch (e) { }
-							}
-							buf = null
-							try { global.runGC && global.runGC() } catch (e) { }
-							that.finishIndex(idx)
-						}
-					}
-					setTimeout(processSlice, 0)
-				},
-				fail: function () { that.applyWords([]) }
-			})
-		} catch (e) {
-			that.applyWords([])
+		var idx = []
+		var lineNo = 0
+		var pos = 0
+		var remain = ''
+		function pushLightLine(l) {
+			try {
+				var o = JSON.parse(l)
+				idx.push({ w: o.w || '', e: o.e, i: o.i, lvl: o.lvl, c: o.c, wc: o.wc, next: o.next, lineNo: lineNo })
+			} catch (e) { }
+			lineNo++
 		}
+		function parseText(text) {
+			var parts = text.split('\n')
+			remain = parts.pop()   // 段尾残留可能是不完整行，拼到下一段
+			for (var k = 0; k < parts.length; k++) {
+				var l = parts[k].trim()
+				if (l) pushLightLine(l)
+			}
+			// 每段更新一次进度（不频繁刷新 UI），让用户看到在动、不是假死
+			that.debug = '词库加载中 ' + lineNo + ' 词'
+		}
+		function finishLight() {
+			if (remain) {
+				var l = remain.trim()
+				if (l) { try { pushLightLine(l) } catch (e) { } }
+			}
+			remain = ''
+			try { global.runGC && global.runGC() } catch (e) { }
+			that.finishIndex(idx)
+		}
+		function readNext() {
+			// 每段读前检查接收中标记：推送进行时立即中止，绝不与写盘并行解析
+			storage.get('receiving', 0).then(function (recv) {
+				if (recv > 0) { that._indexing = false; that.applyWords([]); return }
+				try {
+					file.readArrayBuffer({
+						uri: WORDS_URI,
+						position: pos,
+						length: READ_STEP,
+						success: function (data) {
+							var buf = data && data.buffer
+							if (!buf || !buf.length) { finishLight(); return }
+							parseText(decode16(buf))
+							pos += buf.length          // 按实际读到的字节推进
+							readNext()                 // 文件回调天然让出事件循环
+						},
+						fail: function () { finishLight() }
+					})
+				} catch (e) { finishLight() }
+			})
+		}
+		readNext()
 	},
 
 	finishIndex(idx) {
@@ -316,96 +330,78 @@ export default {
 		for (var k = 0; k < n; k++) want[tmp[k].lineNo] = true
 		tmp = null
 		try { global.runGC && global.runGC() } catch (e) { }
-		// 先 file.get 拿实际字节数，再按实际大小一次读全取这批词的完整内容（含释义）
-		try {
-			file.get({
-				uri: WORDS_URI,
-				success: function (d) {
-					that.readBatchFromFile((d && d.length) || 0, want, function (words) {
-						if (!words.length) {
-							that.mode = 'done'
-							return
-						}
-						that.words = words
-						that.batchSize = words.length
-						that.roundNo++
-						that.idx = 0
-						that.answered = {}
-						that.retryQueue = []
-						that.retryCounts = {}
-						that.sinceRetry = 0
-						that.roundDone = 0
-						that.choosing = false
-						that.animClass = 'animIn'
-						that.curWord = words[0]
-						that.studyStart = Date.now()
-						that.mode = 'study'
-						that.debug = ''
-						try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
-					})
-				},
-				fail: function () { that.mode = 'done' }
-			})
-		} catch (e) {
-			this.mode = 'done'
-		}
+		// 分段读文件取这批词的完整内容（含释义），按实际字节推进，取批不卡 UI
+		this.readBatchFromFile(want, function (words) {
+			if (!words.length) {
+				that.mode = 'done'
+				return
+			}
+			that.words = words
+			that.batchSize = words.length
+			that.roundNo++
+			that.idx = 0
+			that.answered = {}
+			that.retryQueue = []
+			that.retryCounts = {}
+			that.sinceRetry = 0
+			that.roundDone = 0
+			that.choosing = false
+			that.animClass = 'animIn'
+			that.curWord = words[0]
+			that.studyStart = Date.now()
+			that.mode = 'study'
+			that.debug = ''
+			try { brightness.setKeepScreenOn({ keepScreenOn: true }) } catch (e) { }
+		})
 	},
 
-	// 一次读全文件（1 次调用）+ 分片逐行匹配本批词的完整对象（附加 _ln 行号），
-	// 分片让出事件循环，取批期间不阻塞 UI。
-	// 关键：length 必须传实际文件大小，绝不传 16MB 等大值（否则按 length 分配
-	// 超大 buffer → OOM 红字重启）
-	readBatchFromFile(fileSize, want, cb) {
+	// 分段读文件 + 按行号匹配本批词的完整对象（附加 _ln 行号）
+	// 喵喵式分段：READ_STEP 字节/段，按"实际读到的字节数"推进，读到空即结束，
+	// 不依赖 file.get length 单位；段间靠文件 API 异步回调天然让出事件循环，
+	// 不用 setTimeout 递归（Vela 上递归 setTimeout 有栈溢出→卡死重启风险）
+	readBatchFromFile(want, cb) {
 		var out = []
 		var lineNo = 0
-		var cur = ''
-		if (!fileSize || fileSize <= 0) { cb(out); return }
-		try {
-			file.readArrayBuffer({
-				uri: WORDS_URI,
-				position: 0,
-				length: fileSize,
-				success: function (data) {
-					var buf = data && data.buffer
-					if (!buf || !buf.length) { cb(out); return }
-					var i = 0
-					var total = buf.length
-					function processSlice() {
-						var limit = Math.min(total, i + 512 * 64 * 2)
-						while (i < limit) {
-							var c = String.fromCharCode(buf[i + 1] * 256 + buf[i])
-							i += 2
-							if (c === '\n') {
-								var l = cur.trim()
-								if (l) {
-									if (want[lineNo]) {
-										try { var o = JSON.parse(l); o._ln = lineNo; out.push(o) } catch (e) { }
-									}
-									lineNo++
-								}
-								cur = ''
-							} else {
-								cur += c
+		var pos = 0
+		var remain = ''
+		function parseBatch(text) {
+			var parts = text.split('\n')
+			remain = parts.pop()
+			for (var k = 0; k < parts.length; k++) {
+				var l = parts[k].trim()
+				if (l) {
+					if (want[lineNo]) {
+						try { var o = JSON.parse(l); o._ln = lineNo; out.push(o) } catch (e) { }
+					}
+					lineNo++
+				}
+			}
+		}
+		function readNext() {
+			try {
+				file.readArrayBuffer({
+					uri: WORDS_URI,
+					position: pos,
+					length: READ_STEP,
+					success: function (data) {
+						var buf = data && data.buffer
+						if (!buf || !buf.length) {
+							if (remain && want[lineNo]) {
+								try { var o = JSON.parse(remain.trim()); o._ln = lineNo; out.push(o) } catch (e) { }
 							}
-						}
-						if (i < total) {
-							setTimeout(processSlice, 0)
-						} else {
-							if (cur.trim() && want[lineNo]) {
-								try { var o = JSON.parse(cur.trim()); o._ln = lineNo; out.push(o) } catch (e) { }
-							}
-							buf = null
 							try { global.runGC && global.runGC() } catch (e) { }
 							cb(out)
+							return
 						}
-					}
-					setTimeout(processSlice, 0)
-				},
-				fail: function () { cb(out) }
-			})
-		} catch (e) {
-			cb(out)
+						parseBatch(decode16(buf))
+						pos += buf.length          // 按实际读到的字节推进
+						readNext()                 // 文件回调天然让出事件循环
+					},
+					fail: function () { cb(out) }
+				})
+			} catch (e) { cb(out) }
 		}
+		readNext()
 	},
 
 	onTouchStart(e) {

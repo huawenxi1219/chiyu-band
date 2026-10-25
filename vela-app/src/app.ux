@@ -59,49 +59,40 @@ function str2abUtf16(str) {
 }
 
 // 把一块词追加写入词库文件（每词一行 JSON，jsonl 格式）
-// 稳内存策略：16KB 大块拆成两次写（每次 ~8KB），写前 runGC，
-// 避免"整块 JSON 字符串 + UTF-16 buffer"同时驻留的峰值撞爆手环内存（红字重启）。
+// 喵喵基准：20KB 大块一次写已验证稳定（其小说数 MB 上传不重启）。
+// 我们 16KB 块一次写同样安全；写前 runGC 压峰值。
 // 兜底：writeArrayBuffer 偶发"永不回调"（Vela 文件 API 不稳定）→ 3 秒超时视为完成，
 // 绝不让推送卡死
 function appendWordsToFile(words) {
   return new Promise(function (resolve, reject) {
-    function writeHalf(arr) {
-      return new Promise(function (res, rej) {
-        var text = ''
-        for (var i = 0; i < arr.length; i++) {
-          try { text += JSON.stringify(arr[i]) + '\n' } catch (e) { }
-        }
-        var done = false
-        var timer = setTimeout(function () {
-          if (!done) {
-            done = true
-            globalThis.diag('push', 'WRITE TIMEOUT skip ' + arr.length)
-            res()
-          }
-        }, 3000)
-        try {
-          file.writeArrayBuffer({
-            uri: WORDS_URI,
-            buffer: str2abUtf16(text),
-            append: true,
-            success: function () {
-              if (!done) { done = true; clearTimeout(timer); res() }
-            },
-            fail: function (e) {
-              if (!done) { done = true; clearTimeout(timer); rej(e) }
-            }
-          })
-        } catch (e) {
-          if (!done) { done = true; clearTimeout(timer); rej(e) }
+    var text = ''
+    for (var i = 0; i < words.length; i++) {
+      try { text += JSON.stringify(words[i]) + '\n' } catch (e) { }
+    }
+    var done = false
+    var timer = setTimeout(function () {
+      if (!done) {
+        done = true
+        globalThis.diag('push', 'WRITE TIMEOUT skip ' + words.length)
+        resolve()
+      }
+    }, 3000)
+    try {
+      global.runGC && global.runGC()
+      file.writeArrayBuffer({
+        uri: WORDS_URI,
+        buffer: str2abUtf16(text),
+        append: true,
+        success: function () {
+          if (!done) { done = true; clearTimeout(timer); resolve() }
+        },
+        fail: function (e) {
+          if (!done) { done = true; clearTimeout(timer); reject(e) }
         }
       })
+    } catch (e) {
+      if (!done) { done = true; clearTimeout(timer); reject(e) }
     }
-    var mid = Math.ceil(words.length / 2)
-    try { global.runGC && global.runGC() } catch (e) { }
-    writeHalf(words.slice(0, mid)).then(function () {
-      try { global.runGC && global.runGC() } catch (e) { }
-      return writeHalf(words.slice(mid))
-    }).then(resolve, reject)
   })
 }
 
